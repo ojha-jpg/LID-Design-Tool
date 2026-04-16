@@ -48,9 +48,3 @@ The Peak Runoff tool uses these public APIs (no keys required):
 | MRLC WCS (NLCD 2024) | Land cover classification |
 | USGS 3DEP | DEM elevation for slope and flow length |
 
-## Streamlit Cloud Deployment
-
-1. Push this repository to GitHub.
-2. Go to [share.streamlit.io](https://share.streamlit.io) and connect the repo.
-3. Set **Main file path** to `app.py`.
-4. Deploy — no environment variables or secrets needed.
