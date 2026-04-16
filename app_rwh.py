@@ -170,6 +170,7 @@ def load_tanks_df() -> pd.DataFrame:
     df["capacity_gal_num"] = pd.to_numeric(df["capacity_gal"], errors="coerce")
     df["diameter_in_num"]  = pd.to_numeric(df["diameter_in"],  errors="coerce")
     df["height_in_num"]    = pd.to_numeric(df["height_in"],    errors="coerce")
+    df["price_str"]        = df["price"].fillna("N/A") if "price" in df.columns else "N/A"
     return df
 
 
@@ -310,6 +311,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
     story.append(Spacer(1, 2))
     story.append(_kv_table([
         ("Tank Capacity",       f"{inp['tank_gal']:,.0f} gal"),
+        ("Tank Price",          inp.get("tank_price_str", "N/A")),
         ("Tank Diameter",       f"{inp['tank_dia_in']:.1f} in"),
         ("Tank Height (htank)", f"{inp['tank_h_in']:.1f} in"),
         ("Height for Stormwater Storage", f"{res['h_store_sw_in']:.2f} in"),
@@ -455,14 +457,17 @@ def main() -> None:
             st.session_state["tank_h_in"]   = float(rec["height_in_num"])
         st.session_state["_auto_vol_total"] = _vol_total
 
+    tank_price_str = "N/A"
     if rec is not None:
         tank_url = rec.get("url", "") if hasattr(rec, "get") else rec["url"] if "url" in rec.index else ""
         link_md = f"\n\n[View product page]({tank_url})" if tank_url else ""
+        tank_price_str = rec.get("price_str", "N/A") if hasattr(rec, "get") else rec["price_str"] if "price_str" in rec.index else "N/A"
         st.sidebar.info(
             f"**Auto-selected:** {rec['name']}\n\n"
             f"Capacity: **{rec['capacity_gal_num']:.0f} gal** · "
             f"Dia: **{rec['diameter_in_num']:.0f} in** · "
             f"Height: **{rec['height_in_num']:.0f} in**\n\n"
+            f"Price: **{tank_price_str}**\n\n"
             f"Values pre-filled below — edit if needed.{link_md}"
         )
     else:
@@ -567,6 +572,7 @@ def main() -> None:
         "tank_gal": tank_gal, "tank_dia_in": tank_dia_in,
         "tank_h_in": tank_h_in, "h_offset_in": h_offset_in,
         "ff_pipe_size": ff_pipe_size,
+        "tank_price_str": tank_price_str,
     }
 
     st.sidebar.info(

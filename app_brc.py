@@ -2,17 +2,17 @@
 Bio-Retention Cell (BRC) Design Tool
 Based on City of Tulsa LID Manual (2026) - Chapter 101
 
-This tool implements the 10-step design process for bioretention cells:
-1. Site Selection & Siting Offsets
-2. Determine Contributing Area & SWV (Stormwater Volume)
-3. Determine Infiltration Rate
-4. Select & Check Ponding Depth
-5. Select Media Depth (underdrain only)
-6. Verify Total Drawdown Time
-7. Select Cell Area & Compute Storage Capacity
-8. Underdrain Sizing
-9. Slow-Release Orifice Outlet
-10. Overflow Outlet Sizing
+This tool implements the design workflow for bioretention cells:
+- Site selection and siting offsets
+- Contributing area and SWV (stormwater volume)
+- Infiltration rate
+- Ponding depth
+- Media depth (underdrain only)
+- Total drawdown verification
+- Cell area and storage capacity
+- Underdrain sizing
+- Slow-release orifice outlet
+- Overflow outlet sizing
 
 
 Reference: City of Tulsa Engineering Manual (2021), Chapter 101: Bioretention and Biofiltration
@@ -23,6 +23,10 @@ import math
 from datetime import date
 
 import streamlit as st
+import folium
+from folium.plugins import MousePosition
+from streamlit_folium import st_folium
+from api_clients import fetch_site_soil_texture, geocode_address, infer_design_soil_type
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
@@ -77,6 +81,185 @@ SOIL_INFILTRATION_RATES = {
     "Clay Loam": 0.28,
     "Clay": 0.03,
 }
+
+
+DEFAULT_SOIL_TYPE = "Sandy Loam"
+OKLAHOMA_CENTER = [35.5, -97.5]
+DEFAULT_MAP_ZOOM = 7
+_fragment = getattr(st, "fragment", lambda f: f)
+
+
+def _init_state() -> None:
+    """Initialise BRC widget state used for SSURGO-based soil lookup."""
+    defaults = {
+        "brc_soil_type": DEFAULT_SOIL_TYPE,
+        "brc_prev_soil_type": DEFAULT_SOIL_TYPE,
+        "brc_native_infiltration": float(SOIL_INFILTRATION_RATES[DEFAULT_SOIL_TYPE]),
+        "brc_soil_lookup_lat": "",
+        "brc_soil_lookup_lon": "",
+        "brc_soil_lookup_address": "",
+        "brc_soil_lookup_result": None,
+        "brc_soil_lookup_error": None,
+        "brc_selected_lat": None,
+        "brc_selected_lon": None,
+        "brc_map_center": OKLAHOMA_CENTER,
+        "brc_map_zoom": DEFAULT_MAP_ZOOM,
+        "brc_geocode_match": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _soil_mix_summary(textures: dict[str, float]) -> str:
+    """Compact USDA texture summary for sidebar display."""
+    return ", ".join(f"{name} ({pct:.1f}%)" for name, pct in textures.items())
+
+
+def _set_lookup_point(lat: float, lon: float, zoom: int = 13) -> None:
+    """Sync a selected map/address point into the soil-lookup fields."""
+    st.session_state["brc_selected_lat"] = float(lat)
+    st.session_state["brc_selected_lon"] = float(lon)
+    st.session_state["brc_map_center"] = [float(lat), float(lon)]
+    st.session_state["brc_map_zoom"] = int(zoom)
+    st.session_state["brc_soil_lookup_lat"] = f"{float(lat):.6f}"
+    st.session_state["brc_soil_lookup_lon"] = f"{float(lon):.6f}"
+    st.session_state["brc_soil_lookup_result"] = None
+    st.session_state["brc_soil_lookup_error"] = None
+
+
+def _perform_soil_lookup() -> None:
+    """Fetch USDA soil texture for the currently selected/manual BRC location."""
+    try:
+        lat = float(st.session_state["brc_soil_lookup_lat"])
+        lon = float(st.session_state["brc_soil_lookup_lon"])
+    except ValueError:
+        st.session_state["brc_soil_lookup_error"] = "Enter valid decimal coordinates before running the soil lookup."
+        st.session_state["brc_soil_lookup_result"] = None
+        return
+
+    soil_lookup, soil_lookup_live = fetch_site_soil_texture(lat, lon)
+    if soil_lookup_live and soil_lookup:
+        dominant_texture = soil_lookup.get("dominant_texture")
+        inferred_soil = infer_design_soil_type(dominant_texture)
+        soil_lookup["soil_type"] = inferred_soil
+        st.session_state["brc_soil_lookup_result"] = soil_lookup
+        st.session_state["brc_soil_lookup_error"] = None
+        if inferred_soil in SOIL_INFILTRATION_RATES:
+            st.session_state["brc_soil_type"] = inferred_soil
+            st.session_state["brc_prev_soil_type"] = inferred_soil
+            st.session_state["brc_native_infiltration"] = float(SOIL_INFILTRATION_RATES[inferred_soil])
+    else:
+        st.session_state["brc_soil_lookup_error"] = (
+            "USDA soil texture lookup failed for that location. Adjust the location or enter soil data manually."
+        )
+        st.session_state["brc_soil_lookup_result"] = None
+
+
+@_fragment
+def _render_site_selector_map() -> None:
+    """Fragment-isolated BRC point-selection map with immediate marker updates."""
+    if st.session_state["brc_selected_lat"] is not None:
+        _map_center = [st.session_state["brc_selected_lat"], st.session_state["brc_selected_lon"]]
+    else:
+        _map_center = st.session_state.get("brc_map_center") or OKLAHOMA_CENTER
+    _map_zoom = st.session_state.get("brc_map_zoom") or DEFAULT_MAP_ZOOM
+
+    m = folium.Map(location=_map_center, zoom_start=_map_zoom, tiles="OpenStreetMap")
+    MousePosition().add_to(m)
+
+    if st.session_state["brc_selected_lat"] is not None:
+        _lat = st.session_state["brc_selected_lat"]
+        _lon = st.session_state["brc_selected_lon"]
+        folium.Marker(
+            location=[_lat, _lon],
+            tooltip="Selected BRC Site",
+            popup=folium.Popup(
+                f"<b>Selected point</b><br>{_lat:.5f}&deg;N, {_lon:.5f}&deg;",
+                max_width=200,
+            ),
+            icon=folium.Icon(color="red", icon="info-sign"),
+        ).add_to(m)
+
+    map_data = st_folium(m, use_container_width=True, height=360, key="brc_site_selector_map")
+
+    if map_data and map_data.get("last_clicked"):
+        if map_data.get("center"):
+            c = map_data["center"]
+            st.session_state["brc_map_center"] = [c["lat"], c["lng"]]
+        if map_data.get("zoom"):
+            st.session_state["brc_map_zoom"] = map_data["zoom"]
+        st.session_state["brc_selected_lat"] = map_data["last_clicked"]["lat"]
+        st.session_state["brc_selected_lon"] = map_data["last_clicked"]["lng"]
+        st.session_state["brc_soil_lookup_lat"] = f"{st.session_state['brc_selected_lat']:.6f}"
+        st.session_state["brc_soil_lookup_lon"] = f"{st.session_state['brc_selected_lon']:.6f}"
+        st.session_state["brc_geocode_match"] = None
+        st.rerun()
+
+
+def _render_site_selector() -> None:
+    """Address search + clickable map for selecting the BRC soil lookup point."""
+    with st.expander("Site Selector", expanded=False):
+        st.caption("Search by address or click the map to choose the BRC location used for USDA soil lookup.")
+
+        with st.form("brc_address_form", clear_on_submit=False):
+            st.text_input(
+                "Project Address",
+                key="brc_soil_lookup_address",
+                placeholder="e.g. 175 E 2nd St, Tulsa, OK",
+            )
+            geocode_submit = st.form_submit_button("Find Address", use_container_width=True)
+
+        if geocode_submit:
+            match, is_live = geocode_address(st.session_state["brc_soil_lookup_address"])
+            if is_live and match:
+                _set_lookup_point(match["lat"], match["lon"])
+                st.session_state["brc_geocode_match"] = match["matched_address"]
+            else:
+                st.session_state["brc_geocode_match"] = None
+                st.warning("Address lookup failed. Try a more specific US street address or click the map instead.")
+
+        _render_site_selector_map()
+
+        selected_lat = st.session_state.get("brc_selected_lat")
+        selected_lon = st.session_state.get("brc_selected_lon")
+        matched_address = st.session_state.get("brc_geocode_match")
+        if matched_address:
+            st.caption(f"Matched address: **{matched_address}**")
+        if selected_lat is not None and selected_lon is not None:
+            st.success(f"Selected Point: Latitude = {selected_lat:.6f}, Longitude = {selected_lon:.6f}")
+            col_a, col_b = st.columns([5, 1])
+            with col_a:
+                if st.button("Fetch Soil For Selected Point", key="brc_fetch_soil_from_map", type="primary", use_container_width=True):
+                    _perform_soil_lookup()
+            with col_b:
+                if st.button("Clear", key="brc_clear_site_point", use_container_width=True):
+                    st.session_state["brc_selected_lat"] = None
+                    st.session_state["brc_selected_lon"] = None
+                    st.session_state["brc_soil_lookup_lat"] = ""
+                    st.session_state["brc_soil_lookup_lon"] = ""
+                    st.session_state["brc_geocode_match"] = None
+                    st.session_state["brc_soil_lookup_result"] = None
+                    st.session_state["brc_soil_lookup_error"] = None
+                    try:
+                        st.rerun(scope="app")
+                    except TypeError:
+                        st.rerun()
+
+        soil_lookup_result = st.session_state.get("brc_soil_lookup_result")
+        soil_lookup_error = st.session_state.get("brc_soil_lookup_error")
+        if soil_lookup_result:
+            dominant_texture = soil_lookup_result.get("dominant_texture") or "Unknown"
+            inferred_soil = infer_design_soil_type(dominant_texture)
+            soil_lookup_result["soil_type"] = inferred_soil
+            st.success(f"USDA dominant texture: **{dominant_texture}**")
+            if inferred_soil:
+                st.caption(f"Mapped to design soil type **{inferred_soil}**.")
+            textures = soil_lookup_result.get("textures") or {}
+            if textures:
+                st.caption(f"Sample mix: {_soil_mix_summary(textures)}")
+        elif soil_lookup_error:
+            st.warning(soil_lookup_error)
 
 # ============================================================================
 # DESIGN CALCULATIONS (following Tulsa LID Manual equations)
@@ -532,7 +715,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
         size=14, bold=True, color=colors.white,
     )
     sub_para = _p(
-        f"City of Tulsa LID Manual (2026) — Chapter 101 · 10-Step Design Process      "
+        f"City of Tulsa LID Manual (2026) — Chapter 101 · Design Process      "
         f"Generated: {date.today().strftime('%B %d, %Y')}",
         size=7.5, color=colors.HexColor("#AED6F1"),
     )
@@ -592,6 +775,22 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
     else:
         results_rows.insert(4, ("Infiltration Storage", "4.0 hrs (fixed)"))
     story.append(_kv_table(results_rows))
+
+    # Loading ratio PASS / FAIL badge
+    lr_text  = "Loading Ratio  PASS" if res["lr_valid"] else "Loading Ratio  FAIL"
+    lr_color = DGREEN if res["lr_valid"] else DRED
+    lr_bg    = GREEN  if res["lr_valid"] else RED
+    lr_para  = _p(lr_text, size=9, bold=True, color=lr_color)
+    lr_tbl   = Table([[lr_para]], colWidths=[W])
+    lr_tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), lr_bg),
+        ("BOX",           (0, 0), (-1, -1), 0.5, lr_color),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 8),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(Spacer(1, 4))
+    story.append(lr_tbl)
     story.append(Spacer(1, 8))
 
     # Section 3: Orifice (if applicable)
@@ -658,8 +857,11 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 # ============================================================================
 
 def main() -> None:
+    _init_state()
+
     st.title("Bio-Retention Cell (BRC) Design Tool")
-    st.caption("City of Tulsa LID Manual (2026) — Chapter 101 · 10-Step Design Process")
+    st.caption("City of Tulsa LID Manual (2026) — Chapter 101")
+    _render_site_selector()
 
     # ========================================================================
     # SIDEBAR INPUTS
@@ -681,7 +883,7 @@ def main() -> None:
     )
     inside_placement = placement == "Inside Placement"
 
-    # Step 2: Determine Contributing Area & SWV
+    # Contributing Area & SWV
     st.sidebar.subheader("Contributing Drainage Area")
 
     _c1, _c2 = st.sidebar.columns(2)
@@ -704,23 +906,30 @@ def main() -> None:
     total_area = impervious_area + pervious_area
     st.sidebar.caption(f"Total: **{total_area:,.0f} ft²**")
 
-    # Step 3: Determine Infiltration Rate
-    st.sidebar.subheader("Step 3: Infiltration Rate")
+    # Infiltration Rate
+    st.sidebar.subheader("Infiltration Rate")
 
+    soil_options = list(SOIL_INFILTRATION_RATES.keys())
+    if st.session_state["brc_soil_type"] not in SOIL_INFILTRATION_RATES:
+        st.session_state["brc_soil_type"] = DEFAULT_SOIL_TYPE
     soil_type = st.sidebar.selectbox(
         "Native Soil Type",
-        options=list(SOIL_INFILTRATION_RATES.keys()),
+        options=soil_options,
+        key="brc_soil_type",
         help="Select native soil from Table 101.2. Used to determine default infiltration rate.",
     )
+    if soil_type != st.session_state.get("brc_prev_soil_type"):
+        st.session_state["brc_prev_soil_type"] = soil_type
+        st.session_state["brc_native_infiltration"] = float(SOIL_INFILTRATION_RATES[soil_type])
 
     native_infiltration_default = SOIL_INFILTRATION_RATES[soil_type]
 
     native_infiltration = st.sidebar.number_input(
         "Native Infiltration Rate (in/hr)",
         min_value=0.001,
-        value=float(native_infiltration_default),
         step=0.1,
         format="%.3f",
+        key="brc_native_infiltration",
         help=(
             f"Default value from Table 101.2 for **{soil_type}**: {native_infiltration_default} in/hr. "
             "You may edit this value to match site-specific test data."
@@ -767,54 +976,17 @@ def main() -> None:
 
         )
 
-    # Step 4 & 5: Ponding Depth and (optional) Media Depth
+    # Ponding Depth and (optional) Media Depth
     max_ponding = get_max_ponding_depth(infiltration_rate)
 
     media_depth = None
     if underdrain_required:
         max_media = get_max_media_depth(infiltration_rate, PHI_BRC)
-        st.sidebar.subheader("Steps 4–5: Depths")
-        _d1, _d2 = st.sidebar.columns(2)
-        ponding_depth = _d1.number_input(
-            f"Ponding (ft)\nmax {max_ponding:.2f}",
-            min_value=0.1,
-            value=0.75,
-            step=0.05,
-            format="%.2f",
-            help=f"**Eq. 101.3:** D_p ≤ I × 24 ÷ 12. Max: {max_ponding:.2f} ft.",
-        )
-        media_depth = _d2.number_input(
-            f"Media (ft)\nmax {max_media:.2f}",
-            min_value=0.5,
-            value=2.75,
-            step=0.1,
-            format="%.2f",
-            help=f"**Eq. 101.4:** D_m ≤ (I × 4) ÷ (φ × 12). Max: {max_media:.2f} ft.",
-        )
-
-        st.sidebar.subheader("Underdrain Diameter")
-        _u1, _u2 = st.sidebar.columns(2)
-        underdrain_diameter_in = _u1.number_input(
-            "Underdrain Diameter (in)",
-            min_value=0.5,
-            value=float(OU_PIPE_IN),
-            step=0.25,
-            format="%.2f",
-            help="Underdrain pipe diameter used in storage and orifice calculations.",
-        )
-        underdrain_length_ft = float(LU_UNDERDRAIN)
+        underdrain_diameter_in = float(OU_PIPE_IN)
+        underdrain_length_ft   = float(LU_UNDERDRAIN)
     else:
         underdrain_diameter_in = OU_PIPE_IN
-        underdrain_length_ft = LU_UNDERDRAIN
-        st.sidebar.subheader("Step 4: Ponding Depth")
-        ponding_depth = st.sidebar.number_input(
-            f"Ponding Depth (ft)  —  max {max_ponding:.2f} ft",
-            min_value=0.1,
-            value=0.75,
-            step=0.05,
-            format="%.2f",
-            help=f"**Eq. 101.3:** D_p ≤ I × 24 ÷ 12. Max: {max_ponding:.2f} ft. Typical: 0.5–1.0 ft.",
-        )
+        underdrain_length_ft   = LU_UNDERDRAIN
 
     # Design precipitation depth
     st.sidebar.subheader("Precipitation")
@@ -827,20 +999,56 @@ def main() -> None:
     )
 
     # ========================================================================
-    # MAIN AREA: STEP 7 — CELL AREA SELECTION
+    # MAIN AREA: DEPTHS & CELL AREA
     # ========================================================================
     st.divider()
-    st.subheader("Step 7: Select Bioretention Cell Area")
-
-    col_area1, col_area2 = st.columns([1, 2])
-    with col_area1:
-        brc_area = st.number_input(
+    if underdrain_required:
+        st.subheader("Depths and Cell Area")
+        _d1, _d2, _d3 = st.columns(3)
+        ponding_depth = _d1.number_input(
+            f"Ponding Depth (ft)  —  max {max_ponding:.2f} ft",
+            min_value=0.1,
+            value=0.75,
+            step=0.05,
+            format="%.2f",
+        )
+        media_depth = _d2.number_input(
+            f"Media Depth (ft)  —  max {max_media:.2f} ft",
+            min_value=0.5,
+            value=2.75,
+            step=0.1,
+            format="%.2f",
+        )
+        brc_area = _d3.number_input(
             "Bioretention Cell Area (ft²)",
             min_value=10.0,
-            value=260.0 if not underdrain_required else 225.0,
+            value=225.0,
             step=10.0,
             help="Total cell footprint area. Adjust until storage capacity ≥ SWV and loading ratio ≥ 3%.",
         )
+    else:
+        st.subheader("Ponding Depth and Cell Area")
+        _d1, _d2 = st.columns(2)
+        ponding_depth = _d1.number_input(
+            f"Ponding Depth (ft)  —  max {max_ponding:.2f} ft",
+            min_value=0.1,
+            value=0.75,
+            step=0.05,
+            format="%.2f",
+        )
+        brc_area = _d2.number_input(
+            "Bioretention Cell Area (ft²)",
+            min_value=10.0,
+            value=260.0,
+            step=10.0,
+            help="Total cell footprint area. Adjust until storage capacity ≥ SWV and loading ratio ≥ 3%.",
+        )
+
+    # ========================================================================
+    # MAIN AREA: CELL AREA CHECK
+    # ========================================================================
+    st.divider()
+    st.subheader("Cell Area Check")
 
     # Compute loading ratio denominator based on placement
     if inside_placement:
@@ -853,22 +1061,30 @@ def main() -> None:
     loading_ratio = calculate_loading_ratio(brc_area, lr_denominator)
     lr_valid = loading_ratio >= TARGET_LOADING_RATIO
 
-    with col_area2:
-        st.info(
-            f"**Placement:** {placement}  \n"
-            f"**Loading Ratio:** A_BRC / {lr_label} = {brc_area:,.0f} / {lr_denominator:,.0f} = **{loading_ratio:.2%}**  \n"
-            f"{'LR ≥ 3% — OK' if lr_valid else 'LR < 3% — Consider increasing cell area'}"
-        )
+    st.info(
+        f"**Placement:** {placement}  \n"
+        f"**Loading Ratio:** A_BRC / {lr_label} = {brc_area:,.0f} / {lr_denominator:,.0f} = **{loading_ratio:.2%}**  \n"
+        f"{'LR ≥ 3% — OK' if lr_valid else 'LR < 3% — Consider increasing cell area'}"
+    )
 
     if underdrain_required:
-        st.sidebar.subheader("Underdrain Geometry")
-        underdrain_length_ft = st.sidebar.number_input(
-            "Underdrain Length (ft)",
+        st.sidebar.subheader("Underdrain")
+        _u1, _u2 = st.sidebar.columns(2)
+        underdrain_diameter_in = _u1.number_input(
+            "Diameter (in)",
+            min_value=0.5,
+            value=float(OU_PIPE_IN),
+            step=0.25,
+            format="%.2f",
+            help="Underdrain pipe diameter.",
+        )
+        underdrain_length_ft = _u2.number_input(
+            "Length (ft)",
             min_value=1.0,
             value=max(brc_area / 10.0, 1.0),
             step=1.0,
             format="%.1f",
-            help="Default = BRC cell area / 10. Used for pipe storage calculations.",
+            help="Default = BRC area / 10.",
         )
 
     # ========================================================================
@@ -1045,7 +1261,7 @@ def main() -> None:
     orifice_dia_in_rounded = None
     if underdrain_required and design_valid and media_depth:
         st.divider()
-        st.subheader("Step 8–9: Optional Underdrain Orifice Outlet (Eqs. 101.12, 101.13)")
+        st.subheader("Optional Underdrain Orifice Outlet (Eqs. 101.12, 101.13)")
 
         # Use ponding depth as head (conservative)
         head_height = ponding_depth + media_depth * PHI_BRC

@@ -3,14 +3,14 @@ Permeable Pavement (PP) Design Tool
 Based on City of Tulsa LID Manual (2026) - Chapter 103
 
 This tool implements the design process for permeable pavements:
-1. Site Selection & Siting Offsets
-2. Determine Contributing Area & SWV (Stormwater Volume)
-3. Determine Infiltration Rate
-4. Select PP Surface Type
-5. Check Maximum Storage Depth (Underdrain Decision)
-6. Select PP Area & Compute Storage Capacity
-7. Underdrain Sizing
-8. Slow-Release Orifice Outlet
+- Site selection and siting offsets
+- Contributing area and SWV (stormwater volume)
+- Infiltration rate
+- PP surface type
+- Maximum storage depth check (underdrain decision)
+- PP area and storage capacity
+- Underdrain sizing
+- Slow-release orifice outlet
 
 Reference: City of Tulsa Engineering Manual (2021), Chapter 103: Permeable Pavements
 """
@@ -20,6 +20,10 @@ import math
 from datetime import date
 
 import streamlit as st
+import folium
+from folium.plugins import MousePosition
+from streamlit_folium import st_folium
+from api_clients import fetch_site_soil_texture, geocode_address, infer_design_soil_type
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet
@@ -98,6 +102,185 @@ PP_SURFACE_TYPES = {
         "choker_course": "Mfg. Spec. (#8 or #89)",
     },
 }
+
+
+DEFAULT_SOIL_TYPE = "Sandy Loam"
+OKLAHOMA_CENTER = [35.5, -97.5]
+DEFAULT_MAP_ZOOM = 7
+_fragment = getattr(st, "fragment", lambda f: f)
+
+
+def _init_state() -> None:
+    """Initialise PP widget state used for SSURGO-based soil lookup."""
+    defaults = {
+        "pp_soil_type": DEFAULT_SOIL_TYPE,
+        "pp_prev_soil_type": DEFAULT_SOIL_TYPE,
+        "pp_native_infiltration": float(SOIL_INFILTRATION_RATES[DEFAULT_SOIL_TYPE]),
+        "pp_soil_lookup_lat": "",
+        "pp_soil_lookup_lon": "",
+        "pp_soil_lookup_address": "",
+        "pp_soil_lookup_result": None,
+        "pp_soil_lookup_error": None,
+        "pp_selected_lat": None,
+        "pp_selected_lon": None,
+        "pp_map_center": OKLAHOMA_CENTER,
+        "pp_map_zoom": DEFAULT_MAP_ZOOM,
+        "pp_geocode_match": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _soil_mix_summary(textures: dict[str, float]) -> str:
+    """Compact USDA texture summary for sidebar display."""
+    return ", ".join(f"{name} ({pct:.1f}%)" for name, pct in textures.items())
+
+
+def _set_lookup_point(lat: float, lon: float, zoom: int = 13) -> None:
+    """Sync a selected map/address point into the soil-lookup fields."""
+    st.session_state["pp_selected_lat"] = float(lat)
+    st.session_state["pp_selected_lon"] = float(lon)
+    st.session_state["pp_map_center"] = [float(lat), float(lon)]
+    st.session_state["pp_map_zoom"] = int(zoom)
+    st.session_state["pp_soil_lookup_lat"] = f"{float(lat):.6f}"
+    st.session_state["pp_soil_lookup_lon"] = f"{float(lon):.6f}"
+    st.session_state["pp_soil_lookup_result"] = None
+    st.session_state["pp_soil_lookup_error"] = None
+
+
+def _perform_soil_lookup() -> None:
+    """Fetch USDA soil texture for the currently selected/manual PP location."""
+    try:
+        lat = float(st.session_state["pp_soil_lookup_lat"])
+        lon = float(st.session_state["pp_soil_lookup_lon"])
+    except ValueError:
+        st.session_state["pp_soil_lookup_error"] = "Enter valid decimal coordinates before running the soil lookup."
+        st.session_state["pp_soil_lookup_result"] = None
+        return
+
+    soil_lookup, soil_lookup_live = fetch_site_soil_texture(lat, lon)
+    if soil_lookup_live and soil_lookup:
+        dominant_texture = soil_lookup.get("dominant_texture")
+        inferred_soil = infer_design_soil_type(dominant_texture)
+        soil_lookup["soil_type"] = inferred_soil
+        st.session_state["pp_soil_lookup_result"] = soil_lookup
+        st.session_state["pp_soil_lookup_error"] = None
+        if inferred_soil in SOIL_INFILTRATION_RATES:
+            st.session_state["pp_soil_type"] = inferred_soil
+            st.session_state["pp_prev_soil_type"] = inferred_soil
+            st.session_state["pp_native_infiltration"] = float(SOIL_INFILTRATION_RATES[inferred_soil])
+    else:
+        st.session_state["pp_soil_lookup_error"] = (
+            "USDA soil texture lookup failed for that location. Adjust the location or enter soil data manually."
+        )
+        st.session_state["pp_soil_lookup_result"] = None
+
+
+@_fragment
+def _render_site_selector_map() -> None:
+    """Fragment-isolated PP point-selection map with immediate marker updates."""
+    if st.session_state["pp_selected_lat"] is not None:
+        _map_center = [st.session_state["pp_selected_lat"], st.session_state["pp_selected_lon"]]
+    else:
+        _map_center = st.session_state.get("pp_map_center") or OKLAHOMA_CENTER
+    _map_zoom = st.session_state.get("pp_map_zoom") or DEFAULT_MAP_ZOOM
+
+    m = folium.Map(location=_map_center, zoom_start=_map_zoom, tiles="OpenStreetMap")
+    MousePosition().add_to(m)
+
+    if st.session_state["pp_selected_lat"] is not None:
+        _lat = st.session_state["pp_selected_lat"]
+        _lon = st.session_state["pp_selected_lon"]
+        folium.Marker(
+            location=[_lat, _lon],
+            tooltip="Selected PP Site",
+            popup=folium.Popup(
+                f"<b>Selected point</b><br>{_lat:.5f}&deg;N, {_lon:.5f}&deg;",
+                max_width=200,
+            ),
+            icon=folium.Icon(color="red", icon="info-sign"),
+        ).add_to(m)
+
+    map_data = st_folium(m, use_container_width=True, height=360, key="pp_site_selector_map")
+
+    if map_data and map_data.get("last_clicked"):
+        if map_data.get("center"):
+            c = map_data["center"]
+            st.session_state["pp_map_center"] = [c["lat"], c["lng"]]
+        if map_data.get("zoom"):
+            st.session_state["pp_map_zoom"] = map_data["zoom"]
+        st.session_state["pp_selected_lat"] = map_data["last_clicked"]["lat"]
+        st.session_state["pp_selected_lon"] = map_data["last_clicked"]["lng"]
+        st.session_state["pp_soil_lookup_lat"] = f"{st.session_state['pp_selected_lat']:.6f}"
+        st.session_state["pp_soil_lookup_lon"] = f"{st.session_state['pp_selected_lon']:.6f}"
+        st.session_state["pp_geocode_match"] = None
+        st.rerun()
+
+
+def _render_site_selector() -> None:
+    """Address search + clickable map for selecting the PP soil lookup point."""
+    with st.expander("Site Selector", expanded=False):
+        st.caption("Search by address or click the map to choose the PP location used for USDA soil lookup.")
+
+        with st.form("pp_address_form", clear_on_submit=False):
+            st.text_input(
+                "Project Address",
+                key="pp_soil_lookup_address",
+                placeholder="e.g. 175 E 2nd St, Tulsa, OK",
+            )
+            geocode_submit = st.form_submit_button("Find Address", use_container_width=True)
+
+        if geocode_submit:
+            match, is_live = geocode_address(st.session_state["pp_soil_lookup_address"])
+            if is_live and match:
+                _set_lookup_point(match["lat"], match["lon"])
+                st.session_state["pp_geocode_match"] = match["matched_address"]
+            else:
+                st.session_state["pp_geocode_match"] = None
+                st.warning("Address lookup failed. Try a more specific US street address or click the map instead.")
+
+        _render_site_selector_map()
+
+        selected_lat = st.session_state.get("pp_selected_lat")
+        selected_lon = st.session_state.get("pp_selected_lon")
+        matched_address = st.session_state.get("pp_geocode_match")
+        if matched_address:
+            st.caption(f"Matched address: **{matched_address}**")
+        if selected_lat is not None and selected_lon is not None:
+            st.success(f"Selected Point: Latitude = {selected_lat:.6f}, Longitude = {selected_lon:.6f}")
+            col_a, col_b = st.columns([5, 1])
+            with col_a:
+                if st.button("Fetch Soil For Selected Point", key="pp_fetch_soil_from_map", type="primary", use_container_width=True):
+                    _perform_soil_lookup()
+            with col_b:
+                if st.button("Clear", key="pp_clear_site_point", use_container_width=True):
+                    st.session_state["pp_selected_lat"] = None
+                    st.session_state["pp_selected_lon"] = None
+                    st.session_state["pp_soil_lookup_lat"] = ""
+                    st.session_state["pp_soil_lookup_lon"] = ""
+                    st.session_state["pp_geocode_match"] = None
+                    st.session_state["pp_soil_lookup_result"] = None
+                    st.session_state["pp_soil_lookup_error"] = None
+                    try:
+                        st.rerun(scope="app")
+                    except TypeError:
+                        st.rerun()
+
+        soil_lookup_result = st.session_state.get("pp_soil_lookup_result")
+        soil_lookup_error = st.session_state.get("pp_soil_lookup_error")
+        if soil_lookup_result:
+            dominant_texture = soil_lookup_result.get("dominant_texture") or "Unknown"
+            inferred_soil = infer_design_soil_type(dominant_texture)
+            soil_lookup_result["soil_type"] = inferred_soil
+            st.success(f"USDA dominant texture: **{dominant_texture}**")
+            if inferred_soil:
+                st.caption(f"Mapped to design soil type **{inferred_soil}**.")
+            textures = soil_lookup_result.get("textures") or {}
+            if textures:
+                st.caption(f"Sample mix: {_soil_mix_summary(textures)}")
+        elif soil_lookup_error:
+            st.warning(soil_lookup_error)
 
 
 # ============================================================================
@@ -418,14 +601,14 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
         ("Total Drawdown (t_dd)",    f"{res['t_dd']:.1f} hrs  (limit 48 hrs)"),
         ("Loading Ratio (LR)",       f"{res['loading_ratio']:.2%}  ({'>=' if res['lr_valid'] else '<'} {TARGET_LOADING_RATIO:.0%} target)"),
         ("",                         ""),
-        ("Max Storage Depth (Eq. 103.2)", f"{res['max_storage_depth']:.2f} ft  ({'OK' if inp['storage_depth'] <= res['max_storage_depth'] else 'EXCEEDED'})"),
+        ("Max Storage Depth",             f"{res['max_storage_depth']:.2f} ft  ({'OK' if inp['storage_depth'] <= res['max_storage_depth'] else 'EXCEEDED'})"),
         ("Contributing Impervious",  f"{res['contributing_impervious']:,.0f} ft²"),
     ]))
     story.append(Spacer(1, 8))
 
     # Section 3: Orifice (if applicable)
     if res.get("orifice_dia_in") is not None:
-        story.append(_section_header("3   Slow-Release Orifice Outlet  (Eq. 103.7)"))
+        story.append(_section_header("3   Slow-Release Orifice Outlet"))
         story.append(Spacer(1, 2))
         story.append(_kv_table([
             ("Effective Head (D_s × φ_S)", f"{res['head_height']:.3f} ft"),
@@ -486,8 +669,11 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 # ============================================================================
 
 def main() -> None:
+    _init_state()
+
     st.title("Permeable Pavement (PP) Design Tool")
     st.caption("City of Tulsa LID Manual (2026) — Chapter 103 · Design Process")
+    _render_site_selector()
 
     # ========================================================================
     # SIDEBAR INPUTS
@@ -509,7 +695,7 @@ def main() -> None:
         ),
     )
 
-    # Step 2: Determine Contributing Area & SWV
+    # Determine Contributing Area & SWV
     st.sidebar.subheader("Contributing Drainage Area")
 
     _c1, _c2 = st.sidebar.columns(2)
@@ -531,21 +717,28 @@ def main() -> None:
     total_area = impervious_area + pervious_area
     st.sidebar.caption(f"Total: **{total_area:,.0f} ft²**")
 
-    # Step 3: Infiltration Rate
-    st.sidebar.subheader("Step 3: Infiltration Rate")
+    # Infiltration Rate
+    st.sidebar.subheader("Infiltration Rate")
+    soil_options = list(SOIL_INFILTRATION_RATES.keys())
+    if st.session_state["pp_soil_type"] not in SOIL_INFILTRATION_RATES:
+        st.session_state["pp_soil_type"] = DEFAULT_SOIL_TYPE
     soil_type = st.sidebar.selectbox(
         "Native Soil Type",
-        options=list(SOIL_INFILTRATION_RATES.keys()),
-        index=2,  # Sandy Loam
+        options=soil_options,
+        key="pp_soil_type",
         help="Select native soil from Table 100.3. Used to determine default infiltration rate.",
     )
+    if soil_type != st.session_state.get("pp_prev_soil_type"):
+        st.session_state["pp_prev_soil_type"] = soil_type
+        st.session_state["pp_native_infiltration"] = float(SOIL_INFILTRATION_RATES[soil_type])
+
     native_infiltration_default = SOIL_INFILTRATION_RATES[soil_type]
     infiltration_rate = st.sidebar.number_input(
         "Native Soil Infiltration Rate (in/hr)",
         min_value=0.001,
-        value=float(native_infiltration_default),
         step=0.1,
         format="%.3f",
+        key="pp_native_infiltration",
         help=(
             f"Default from Table 100.3 for **{soil_type}**: {native_infiltration_default} in/hr. "
             "Edit to match site-specific field measurements."
@@ -563,8 +756,8 @@ def main() -> None:
         help="Typical porosity for #57 stone = 0.40.",
     )
 
-    # Step 4: PP Surface Type
-    st.sidebar.subheader("Step 4: PP Surface Type")
+    # PP Surface Type
+    st.sidebar.subheader("PP Surface Type")
     pp_type = st.sidebar.selectbox(
         "Permeable Pavement Type",
         options=list(PP_SURFACE_TYPES.keys()),
@@ -576,19 +769,9 @@ def main() -> None:
         ),
     )
     pp_info = PP_SURFACE_TYPES[pp_type]
-    min_surface_note = (
-        f"{pp_info['min_surface_in']} in" if pp_info["min_surface_in"]
-        else "Mfg. Specification"
-    )
-    st.sidebar.info(
-        f"**{pp_type}**\n\n"
-        f"Min surface thickness: {min_surface_note}\n"
-        f"Min aggregate base: {pp_info['min_base_in']} in of {pp_info['base_material']}\n"
-        f"Choker course: {pp_info['choker_course']}"
-    )
 
-    # Step 5: Underdrain Decision
-    st.sidebar.subheader("Step 5: Underdrain Decision")
+    # Underdrain Decision
+    st.sidebar.subheader("Underdrain Decision")
     max_storage_depth = calculate_max_storage_depth(infiltration_rate, porosity)
 
     underdrain_auto_required = max_storage_depth < MIN_BASE_DEPTH
@@ -638,14 +821,14 @@ def main() -> None:
         min_value=0.5,
         value=DESIGN_PRECIPITATION,
         step=0.1,
-        help="**Eq. 103.6:** Depth of rain falling on PP surface (typical: 1.2 in for Tulsa).",
+        help="Depth of rain falling on PP surface (typical: 1.2 in for Tulsa).",
     )
 
     # ========================================================================
     # MAIN AREA: PP AREA AND STORAGE DEPTH SELECTION
     # ========================================================================
     st.divider()
-    st.subheader("Step 6: Select PP Area and Storage Depth")
+    st.subheader("Select PP Area and Storage Depth")
 
     col_main1, col_main2 = st.columns(2)
     with col_main1:
@@ -665,11 +848,7 @@ def main() -> None:
             value=2.0,
             step=0.25,
             format="%.2f",
-            help=(
-                "**Eq. 103.2:** Max depth (no underdrain) = "
-                f"(I × 48) / (φ_S × 12) = {max_storage_depth:.2f} ft. "
-                "Minimum aggregate base = 0.5 ft (6 in)."
-            ),
+            help=f"Max depth (no underdrain) = {max_storage_depth:.2f} ft. Min base = 0.5 ft.",
         )
 
     # ========================================================================
@@ -740,7 +919,7 @@ def main() -> None:
     n1, n2, n4, n5, n6 = st.columns(5)
     n1.metric(
         "SWV Required (ft³)", f"{swv_required:.1f}",
-        help="Eq. 103.6: SWV = A_ip×(1/12) + A_PP×(D_p/12)",
+        help="SWV = contributing impervious area × (1/12) + PP area × (precip/12)",
     )
     n2.metric(
         "Storage Capacity (ft³)", f"{storage_capacity:.1f}",
@@ -748,7 +927,7 @@ def main() -> None:
     )
     n4.metric(
         "Total Drawdown", f"{t_dd:.1f} hrs",
-        f"limit {TDD_TOTAL:.0f} hrs", help="Eq. 103.2 rearranged",
+        f"limit {TDD_TOTAL:.0f} hrs",
     )
     n5.metric(
         "Contributing Impervious", f"{contributing_impervious:,.0f} ft²",
@@ -763,7 +942,7 @@ def main() -> None:
     # Depth constraint warnings (inline, no extra section)
     if not use_underdrain and storage_depth > max_storage_depth:
         st.warning(
-            f"Storage depth {storage_depth:.2f} ft exceeds Eq. 103.2 maximum {max_storage_depth:.2f} ft. "
+            f"Storage depth {storage_depth:.2f} ft exceeds maximum {max_storage_depth:.2f} ft. "
             "Reduce depth or add underdrain."
         )
 
@@ -802,7 +981,7 @@ def main() -> None:
     orifice_dia_in_rounded = None
     if use_underdrain and design_valid:
         st.divider()
-        st.subheader("Step 8: Slow-Release Orifice Outlet (Eq. 103.7)")
+        st.subheader("Slow-Release Orifice Outlet")
 
         head_height = storage_depth * porosity  # effective head = D_s × φ_S
         orifice_dia_ft = calculate_orifice_diameter(pp_area, head_height)
@@ -826,7 +1005,7 @@ def main() -> None:
             help="h_actual = storage depth × subbase porosity",
         )
         col_orif2.metric(
-            "Calculated Diameter (Eq. 103.7)",
+            "Calculated Diameter",
             f"{orifice_dia_in:.3f} in",
             help="D_o = sqrt(8·A_PP / (π·C_d·t_d)) × (h/(2g))^0.25",
         )
@@ -835,7 +1014,7 @@ def main() -> None:
             f"{orifice_dia_64ths_num}/64 in  ({orifice_dia_in_rounded:.4f} in)",
         )
         col_orif4.metric(
-            "Detention Time (Eq. 103.8)",
+            "Detention Time",
             f"{detention_time_hr:.1f} hrs",
             help="t_d = (8·A_PP / (π·C_d·D_o²)) × sqrt(h/(2g))",
         )

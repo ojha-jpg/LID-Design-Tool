@@ -14,11 +14,12 @@ Functions:
 import json
 import csv
 import os
+import re
 import tempfile
 import requests
 import numpy as np
 from pyproj import Transformer
-from shapely.geometry import shape, mapping
+from shapely.geometry import Point, shape, mapping
 from shapely.ops import transform as shp_transform
 
 from reference_data import (
@@ -36,6 +37,7 @@ _SDA_WFS_URL    = "https://sdmdataaccess.sc.egov.usda.gov/Spatial/SDMWGS84Geogra
 _SDA_TABULAR_URL = "https://SDMDataAccess.sc.egov.usda.gov/Tabular/SDMTabularService/post.rest"
 _WFS_BBOX_BUFFER = 0.005   # degrees; pads bbox so edge polygons are included
 _SDA_CHUNK       = 400     # max mukeys per tabular IN (...) clause
+_SITE_SOIL_SAMPLE_RADIUS_FT = 25.0
 
 
 def _sda_tabular_query(sql: str) -> list:
@@ -216,12 +218,93 @@ def _fetch_soil_texture_api(watershed_geojson: dict) -> dict:
     }
 
 
+def _site_sample_geojson(lat: float, lon: float, sample_radius_ft: float = _SITE_SOIL_SAMPLE_RADIUS_FT) -> dict:
+    """
+    Return a small buffered polygon around a site point for point-scale SSURGO sampling.
+
+    The soil texture API expects an area geometry, so PP/BRC site lookups sample a small
+    circular polygon around the provided coordinates rather than a watershed.
+    """
+    if not (-90.0 <= lat <= 90.0):
+        raise ValueError("Latitude must be between -90 and 90.")
+    if not (-180.0 <= lon <= 180.0):
+        raise ValueError("Longitude must be between -180 and 180.")
+    if sample_radius_ft <= 0:
+        raise ValueError("Sample radius must be greater than zero.")
+
+    to_5070 = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    to_4326 = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
+
+    point_4326 = Point(lon, lat)
+    point_5070 = shp_transform(to_5070.transform, point_4326)
+    sample_geom_5070 = point_5070.buffer(sample_radius_ft * 0.3048)
+    sample_geom_4326 = shp_transform(to_4326.transform, sample_geom_5070)
+
+    return {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": mapping(sample_geom_4326),
+            "properties": {
+                "lat": lat,
+                "lon": lon,
+                "sample_radius_ft": sample_radius_ft,
+            },
+        }],
+    }
+
+
+def infer_design_soil_type(texture: str) -> str | None:
+    """
+    Map a USDA texture description to the PP/BRC design-soil categories.
+
+    Returns one of the table lookup keys used by the design tools, or None when
+    the USDA texture cannot be mapped confidently.
+    """
+    normalized = re.sub(r"[^a-z\s]", " ", str(texture or "").lower())
+    normalized = " ".join(normalized.split())
+    if not normalized or normalized == "unknown":
+        return None
+
+    words = set(normalized.split())
+    ordered_matches = (
+        ("sandy clay loam", "Sandy Clay Loam"),
+        ("clay loam", "Clay Loam"),
+        ("silt loam", "Silt Loam"),
+        ("sandy loam", "Sandy Loam"),
+        ("loamy sand", "Loamy Sand"),
+    )
+    for needle, soil_type in ordered_matches:
+        if needle in normalized:
+            return soil_type
+
+    # USDA textures such as "Loamy fine sand" or "Loamy very fine sand"
+    # should still map to the loamy-sand design category.
+    if "loamy" in words and "sand" in words:
+        return "Loamy Sand"
+
+    # USDA textures such as "Fine sandy loam" should map to sandy loam.
+    if "sandy" in words and "loam" in words:
+        return "Sandy Loam"
+
+    if "sand" in words:
+        return "Sand"
+    if "silt" in words:
+        return "Silt"
+    if "loam" in words:
+        return "Loam"
+    if "clay" in words:
+        return "Clay"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # USGS StreamStats
 # ---------------------------------------------------------------------------
 
 _SS_BASE = "https://streamstats.usgs.gov"
 _TIMEOUT = 60  # seconds
+_CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 
 
 def delineate_watershed(lat: float, lon: float, region: str = "OK") -> dict:
@@ -408,6 +491,48 @@ def fetch_atlas14(lat: float, lon: float) -> tuple[IDF, bool]:
         raise RuntimeError(f"NOAA Atlas 14 fetch failed: {e}") from e
 
 
+def geocode_address(address: str) -> tuple[dict, bool]:
+    """
+    Geocode a US street address using the US Census geocoder.
+
+    Returns ({"lat": ..., "lon": ..., "matched_address": ...}, is_live: bool).
+    Returns ({}, False) when the address cannot be matched.
+    """
+    address = str(address or "").strip()
+    if not address:
+        return {}, False
+
+    try:
+        resp = requests.get(
+            _CENSUS_GEOCODER_URL,
+            params={
+                "address": address,
+                "benchmark": "Public_AR_Current",
+                "format": "json",
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        matches = resp.json().get("result", {}).get("addressMatches", [])
+        if not matches:
+            return {}, False
+
+        best = matches[0]
+        coords = best.get("coordinates") or {}
+        lat = coords.get("y")
+        lon = coords.get("x")
+        if lat is None or lon is None:
+            return {}, False
+
+        return {
+            "lat": float(lat),
+            "lon": float(lon),
+            "matched_address": str(best.get("matchedAddress") or address),
+        }, True
+    except Exception:
+        return {}, False
+
+
 # ---------------------------------------------------------------------------
 # USDA SSURGO — Soil hydrologic group composition
 # ---------------------------------------------------------------------------
@@ -438,6 +563,37 @@ def fetch_soil_texture(watershed_geojson: dict) -> tuple[dict, bool]:
     """
     try:
         return _fetch_soil_texture_api(watershed_geojson), True
+    except Exception:
+        return {}, False
+
+
+def fetch_site_soil_texture(
+    lat: float,
+    lon: float,
+    sample_radius_ft: float = _SITE_SOIL_SAMPLE_RADIUS_FT,
+) -> tuple[dict, bool]:
+    """
+    Return site-scale SSURGO texture data for PP/BRC tools.
+
+    The result includes:
+      textures         — area-weighted USDA textures within the sample area
+      dominant_texture — highest-percentage texture
+      soil_type        — mapped design soil category for PP/BRC tables, if inferred
+      sample_radius_ft — radius used to build the sample polygon
+    """
+    try:
+        sample_geojson = _site_sample_geojson(lat, lon, sample_radius_ft=sample_radius_ft)
+        textures, is_live = fetch_soil_texture(sample_geojson)
+        if not is_live or not textures:
+            return {}, False
+
+        dominant_texture = next(iter(textures))
+        return {
+            "textures": textures,
+            "dominant_texture": dominant_texture,
+            "soil_type": infer_design_soil_type(dominant_texture),
+            "sample_radius_ft": float(sample_radius_ft),
+        }, True
     except Exception:
         return {}, False
 
@@ -750,6 +906,14 @@ _DEM_WCS = (
     "https://elevation.nationalmap.gov/arcgis/services/3DEPElevation/"
     "ImageServer/WCSServer"
 )
+_DEM_EXPORT_IMAGE = (
+    "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/"
+    "ImageServer/exportImage"
+)
+_DEM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; LID-Peak-Runoff-Tool/1.0)",
+    "Accept": "image/tiff,application/octet-stream;q=0.9,*/*;q=0.8",
+}
 
 # Module-level sentinel: reset to False whenever this module is (re)loaded.
 # Using a module variable rather than a flag on np.can_cast means a Streamlit
@@ -787,6 +951,74 @@ def _patch_numpy_for_pysheds():
 
     np.can_cast = _safe
     _NUMPY_PATCHED = True
+
+
+def _download_dem_geotiff_bytes(
+    bbox_w: float,
+    bbox_s: float,
+    bbox_e: float,
+    bbox_n: float,
+    width: int = 300,
+    height: int = 300,
+) -> tuple[bytes, str]:
+    """Download DEM GeoTIFF bytes with endpoint fallback for hosted environments."""
+    errors: list[str] = []
+
+    # Primary: WCS GetCoverage (works in many local setups).
+    try:
+        resp = requests.get(
+            _DEM_WCS,
+            params={
+                "SERVICE":  "WCS",
+                "VERSION":  "1.0.0",
+                "REQUEST":  "GetCoverage",
+                "COVERAGE": "DEP3Elevation",
+                "CRS":      "EPSG:4326",
+                "BBOX":     f"{bbox_w},{bbox_s},{bbox_e},{bbox_n}",
+                "WIDTH":    str(width),
+                "HEIGHT":   str(height),
+                "FORMAT":   "GeoTIFF",
+            },
+            timeout=90,
+            stream=True,
+            headers=_DEM_HEADERS,
+        )
+        resp.raise_for_status()
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "image" in content_type or "tiff" in content_type or "octet-stream" in content_type:
+            return resp.content, "WCS"
+        errors.append(f"WCS unexpected content-type: {content_type or 'unknown'}")
+    except Exception as exc:
+        errors.append(f"WCS failed: {exc}")
+
+    # Fallback: ArcGIS ImageServer exportImage (often works when WCS is blocked).
+    try:
+        resp = requests.get(
+            _DEM_EXPORT_IMAGE,
+            params={
+                "bbox": f"{bbox_w},{bbox_s},{bbox_e},{bbox_n}",
+                "bboxSR": "4326",
+                "imageSR": "4326",
+                "size": f"{width},{height}",
+                "format": "tiff",
+                "pixelType": "F32",
+                "noData": "-9999",
+                "interpolation": "RSP_BilinearInterpolation",
+                "f": "image",
+            },
+            timeout=90,
+            stream=True,
+            headers=_DEM_HEADERS,
+        )
+        resp.raise_for_status()
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "image" in content_type or "tiff" in content_type or "octet-stream" in content_type:
+            return resp.content, "exportImage"
+        errors.append(f"exportImage unexpected content-type: {content_type or 'unknown'}")
+    except Exception as exc:
+        errors.append(f"exportImage failed: {exc}")
+
+    raise RuntimeError("3DEP DEM download failed; " + " | ".join(errors))
 
 
 def fetch_dem_features(
@@ -851,29 +1083,19 @@ def fetch_dem_features(
         m_per_deg_lon = 111_320.0 * np.cos(np.radians(centre_lat))
         m_per_deg_lat = 111_320.0
 
-        # --- Download DEM (1/3 arc-second ~10 m) ---
-        resp = requests.get(
-            _DEM_WCS,
-            params={
-                "SERVICE":  "WCS",
-                "VERSION":  "1.0.0",
-                "REQUEST":  "GetCoverage",
-                "COVERAGE": "DEP3Elevation",
-                "CRS":      "EPSG:4326",
-                "BBOX":     f"{bbox_w},{bbox_s},{bbox_e},{bbox_n}",
-                "WIDTH":    "300",
-                "HEIGHT":   "300",
-                "FORMAT":   "GeoTIFF",
-            },
-            timeout=90,
-            stream=True,
+        # --- Download DEM (1/3 arc-second ~10 m) with endpoint fallback ---
+        dem_bytes, dem_source = _download_dem_geotiff_bytes(
+            bbox_w=bbox_w,
+            bbox_s=bbox_s,
+            bbox_e=bbox_e,
+            bbox_n=bbox_n,
+            width=300,
+            height=300,
         )
-        resp.raise_for_status()
 
         fd, tmp_raw = tempfile.mkstemp(suffix="_dem_raw.tif")
         with _os.fdopen(fd, "wb") as fh:
-            for chunk in resp.iter_content(65536):
-                fh.write(chunk)
+            fh.write(dem_bytes)
 
         # Rewrite with explicit float32 nodata so pysheds is happy
         NODATA = np.float32(-9999.0)
@@ -997,6 +1219,7 @@ def fetch_dem_features(
             "dem_bounds":     dem_bounds,
             "res_mx":         res_mx,
             "res_my":         res_my,
+            "dem_source":     dem_source,
         }
         if _flow_err:
             result["_flow_length_warning"] = _flow_err

@@ -15,6 +15,8 @@ import json
 import base64
 import io
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 
 # PROJ environment — must be set before any geospatial imports
 def _find_proj_data():
@@ -208,6 +210,120 @@ def _reset():
         if k not in _keep and k != "step":
             st.session_state[k] = None
     st.session_state["step"] = 1
+
+
+def _coords_from_kml_text(coord_text: str) -> list[tuple[float, float]]:
+    """Parse KML coordinates text into a list of (lon, lat) tuples."""
+    coords: list[tuple[float, float]] = []
+    for token in (coord_text or "").replace("\n", " ").split():
+        parts = token.split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            lon = float(parts[0])
+            lat = float(parts[1])
+            coords.append((lon, lat))
+        except ValueError:
+            continue
+    return coords
+
+
+def _feature_collection_from_kml_bytes(data: bytes) -> dict:
+    """Build a GeoJSON FeatureCollection from KML Polygon geometries."""
+    from shapely.geometry import Polygon, mapping
+    from shapely.ops import unary_union
+
+    root = ET.fromstring(data)
+    polygons = []
+
+    for poly_el in root.iter():
+        if not poly_el.tag.endswith("Polygon"):
+            continue
+
+        shell = None
+        holes = []
+        for child in poly_el.iter():
+            if not child.tag.endswith("coordinates"):
+                continue
+
+            ring_coords = _coords_from_kml_text(child.text or "")
+            if len(ring_coords) < 3:
+                continue
+            if ring_coords[0] != ring_coords[-1]:
+                ring_coords.append(ring_coords[0])
+
+            if any(tag.tag.endswith("outerBoundaryIs") for tag in child.iterancestors()) if hasattr(child, "iterancestors") else False:
+                shell = ring_coords
+            elif any(tag.tag.endswith("innerBoundaryIs") for tag in child.iterancestors()) if hasattr(child, "iterancestors") else False:
+                holes.append(ring_coords)
+
+        if shell is None:
+            # Fallback for stdlib ElementTree (no iterancestors):
+            # first coordinates in polygon is shell, remaining are holes.
+            rings = []
+            for child in poly_el.iter():
+                if child.tag.endswith("coordinates"):
+                    ring = _coords_from_kml_text(child.text or "")
+                    if len(ring) >= 3:
+                        if ring[0] != ring[-1]:
+                            ring.append(ring[0])
+                        rings.append(ring)
+            if rings:
+                shell = rings[0]
+                holes = rings[1:]
+
+        if shell is None or len(shell) < 4:
+            continue
+
+        poly = Polygon(shell=shell, holes=holes if holes else None)
+        if poly.is_empty:
+            continue
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if not poly.is_empty:
+            polygons.append(poly)
+
+    if not polygons:
+        raise ValueError("No Polygon geometry found in KML/KMZ. Upload a polygon watershed boundary.")
+
+    merged = unary_union(polygons)
+    feature = {"type": "Feature", "geometry": mapping(merged), "properties": {}}
+    return {"type": "FeatureCollection", "features": [feature]}
+
+
+def _watershed_fc_from_upload(uploaded_file) -> tuple[dict, str]:
+    """Parse uploaded watershed file into a FeatureCollection and source label."""
+    filename = (uploaded_file.name or "").lower()
+    data = uploaded_file.getvalue()
+
+    if filename.endswith((".geojson", ".json")):
+        raw = json.loads(data.decode("utf-8"))
+        geojson_type = raw.get("type", "")
+        if geojson_type == "FeatureCollection":
+            return raw, "GeoJSON"
+        if geojson_type == "Feature":
+            return {"type": "FeatureCollection", "features": [raw]}, "GeoJSON"
+        if geojson_type in ("Polygon", "MultiPolygon"):
+            return {
+                "type": "FeatureCollection",
+                "features": [{"type": "Feature", "geometry": raw, "properties": {}}],
+            }, "GeoJSON"
+        raise ValueError(
+            f"Unsupported GeoJSON type: '{geojson_type}'. Expected Feature, FeatureCollection, Polygon, or MultiPolygon."
+        )
+
+    if filename.endswith(".kml"):
+        return _feature_collection_from_kml_bytes(data), "KML"
+
+    if filename.endswith(".kmz"):
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+            kml_names = [n for n in zf.namelist() if n.lower().endswith(".kml")]
+            if not kml_names:
+                raise ValueError("KMZ does not contain a .kml file.")
+            kml_data = zf.read(kml_names[0])
+        return _feature_collection_from_kml_bytes(kml_data), "KMZ"
+
+    raise ValueError("Unsupported file type. Upload .geojson, .json, .kml, or .kmz.")
 
 
 
@@ -1329,82 +1445,73 @@ def main() -> None:
             # ---------------------------------------------------------------
             # Option A — Upload a pre-delineated watershed GeoJSON
             # ---------------------------------------------------------------
-            with st.expander("Upload watershed GeoJSON (skip StreamStats)", expanded=True):
+            with st.expander("Upload watershed boundary (skip StreamStats)", expanded=True):
                 st.caption(
-                    "Upload a GeoJSON file containing your watershed boundary polygon. "
-                    "Supported types: Feature, FeatureCollection, Polygon, MultiPolygon."
+                    "Upload a watershed boundary polygon file. "
+                    "Supported formats: GeoJSON (.geojson/.json), KML (.kml), KMZ (.kmz)."
                 )
-                uploaded = st.file_uploader("Choose a .geojson or .json file", type=["geojson", "json"], key="ws_upload")
+                uploaded = st.file_uploader(
+                    "Choose a watershed boundary file",
+                    type=["geojson", "json", "kml", "kmz"],
+                    key="ws_upload",
+                )
 
                 if uploaded is not None:
                     try:
-                        raw = json.loads(uploaded.read())
+                        fc, source_fmt = _watershed_fc_from_upload(uploaded)
 
-                        # Normalise to FeatureCollection
-                        geojson_type = raw.get("type", "")
-                        if geojson_type == "FeatureCollection":
-                            fc = raw
-                        elif geojson_type == "Feature":
-                            fc = {"type": "FeatureCollection", "features": [raw]}
-                        elif geojson_type in ("Polygon", "MultiPolygon"):
-                            fc = {"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": raw, "properties": {}}]}
+                        from shapely.geometry import shape as _shape
+                        import geopandas as gpd
+
+                        # Union all features into one geometry
+                        geoms = [_shape(f["geometry"]) for f in fc.get("features", []) if f.get("geometry")]
+                        if not geoms:
+                            st.error("No valid geometries found in the uploaded file.")
                         else:
-                            st.error(f"Unsupported GeoJSON type: '{geojson_type}'. Expected Feature, FeatureCollection, Polygon, or MultiPolygon.")
-                            fc = None
+                            from shapely.ops import unary_union
+                            ws_geom_upload = unary_union(geoms)
 
-                        if fc is not None:
-                            from shapely.geometry import shape as _shape
-                            import geopandas as gpd
+                            # Compute area in sq mi via equal-area projection
+                            ws_gdf_upload = gpd.GeoDataFrame(geometry=[ws_geom_upload], crs="EPSG:4326")
+                            area_m2   = ws_gdf_upload.to_crs("EPSG:5070").geometry.area.iloc[0]
+                            area_sqmi = area_m2 / 2_589_988.11
 
-                            # Union all features into one geometry
-                            geoms = [_shape(f["geometry"]) for f in fc.get("features", []) if f.get("geometry")]
-                            if not geoms:
-                                st.error("No valid geometries found in the uploaded file.")
-                            else:
-                                from shapely.ops import unary_union
-                                ws_geom_upload = unary_union(geoms)
+                            centroid_upload = ws_geom_upload.centroid
+                            lat_upload = centroid_upload.y
+                            lon_upload = centroid_upload.x
 
-                                # Compute area in sq mi via equal-area projection
-                                ws_gdf_upload = gpd.GeoDataFrame(geometry=[ws_geom_upload], crs="EPSG:4326")
-                                area_m2   = ws_gdf_upload.to_crs("EPSG:5070").geometry.area.iloc[0]
-                                area_sqmi = area_m2 / 2_589_988.11
+                            # Build watershed dict compatible with the rest of the app
+                            watershed_from_upload = {
+                                "workspace_id": "N/A",
+                                "geojson": fc,
+                                "area_sqmi": round(area_sqmi, 4),
+                                "request_url": f"(uploaded {source_fmt}: {uploaded.name})",
+                            }
 
-                                centroid_upload = ws_geom_upload.centroid
-                                lat_upload = centroid_upload.y
-                                lon_upload = centroid_upload.x
+                            st.success(
+                                f"Loaded **{uploaded.name}** ({source_fmt}) — "
+                                f"area: **{area_sqmi:.3f} mi²** ({area_sqmi * 640:.1f} ac), "
+                                f"centroid: {lat_upload:.4f}, {lon_upload:.4f}"
+                            )
 
-                                # Build watershed dict compatible with the rest of the app
-                                watershed_from_upload = {
-                                    "workspace_id": "N/A",
-                                    "geojson": fc,
-                                    "area_sqmi": round(area_sqmi, 4),
-                                    "request_url": f"(uploaded: {uploaded.name})",
-                                }
+                            # Preview map
+                            m_prev = folium.Map(location=[lat_upload, lon_upload], zoom_start=11, tiles="CartoDB positron")
+                            folium.GeoJson(
+                                fc,
+                                style_function=lambda _: {"color": "#1a6bb0", "fillOpacity": 0.15, "weight": 2.5},
+                            ).add_to(m_prev)
+                            st_folium(m_prev, height=300, returned_objects=[], use_container_width=True)
 
-                                st.success(
-                                    f"Loaded **{uploaded.name}** — "
-                                    f"area: **{area_sqmi:.3f} mi²** ({area_sqmi * 640:.1f} ac), "
-                                    f"centroid: {lat_upload:.4f}, {lon_upload:.4f}"
-                                )
+                            if st.button("Use this watershed → skip to Step 2", type="primary"):
+                                st.session_state["watershed"]   = watershed_from_upload
+                                st.session_state["basin_chars"] = {}
+                                st.session_state["selected_lat"] = lat_upload
+                                st.session_state["selected_lon"] = lon_upload
+                                st.session_state["step"] = 2
+                                st.rerun()
 
-                                # Preview map
-                                m_prev = folium.Map(location=[lat_upload, lon_upload], zoom_start=11, tiles="CartoDB positron")
-                                folium.GeoJson(
-                                    fc,
-                                    style_function=lambda _: {"color": "#1a6bb0", "fillOpacity": 0.15, "weight": 2.5},
-                                ).add_to(m_prev)
-                                st_folium(m_prev, height=300, returned_objects=[], use_container_width=True)
-
-                                if st.button("Use this watershed → skip to Step 2", type="primary"):
-                                    st.session_state["watershed"]   = watershed_from_upload
-                                    st.session_state["basin_chars"] = {}
-                                    st.session_state["selected_lat"] = lat_upload
-                                    st.session_state["selected_lon"] = lon_upload
-                                    st.session_state["step"] = 2
-                                    st.rerun()
-
-                    except (json.JSONDecodeError, KeyError, ValueError) as exc:
-                        st.error(f"Could not parse GeoJSON: {exc}")
+                    except (json.JSONDecodeError, KeyError, ValueError, ET.ParseError, zipfile.BadZipFile) as exc:
+                        st.error(f"Could not parse uploaded watershed file: {exc}")
 
             st.markdown("---")
             st.caption("— or delineate from a stream point below —")
