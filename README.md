@@ -1,10 +1,9 @@
 # LID Design Tools
 
 **City of Tulsa Low Impact Development (LID) Manual (2026)**  
-University of Oklahoma · Stormwater Engineering
+University of Oklahoma · Advanced LID Design
 
-A web-based suite of stormwater design tools built with Streamlit. All tools run entirely from public APIs — no local spatial data files required.
-
+A web-based suite of stormwater design tools built with Streamlit.
 ## Tools
 
 | Tool | Reference | Description |
