@@ -305,9 +305,63 @@ def infer_design_soil_type(texture: str) -> str | None:
 _SS_BASE = "https://streamstats.usgs.gov"
 _TIMEOUT = 60  # seconds
 _CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+_CENSUS_GEOGRAPHIES_URL = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
 
 
-def delineate_watershed(lat: float, lon: float, region: str = "OK") -> dict:
+def reverse_geocode_state(lat: float, lon: float) -> tuple[dict, bool]:
+    """
+    Reverse-geocode a point to a US state/territory using the Census geocoder.
+
+    Returns ({"state_abbrev": "KS", "state_name": "Kansas"}, is_live: bool).
+    """
+    try:
+        resp = requests.get(
+            _CENSUS_GEOGRAPHIES_URL,
+            params={
+                "x": f"{lon:.6f}",
+                "y": f"{lat:.6f}",
+                "benchmark": "Public_AR_Current",
+                "vintage": "Current_Current",
+                "layers": "States",
+                "format": "json",
+            },
+            timeout=_TIMEOUT,
+        )
+        resp.raise_for_status()
+        states = (
+            resp.json()
+            .get("result", {})
+            .get("geographies", {})
+            .get("States", [])
+        )
+        if not states:
+            return {}, False
+
+        state = states[0]
+        abbrev = str(state.get("STUSAB") or "").strip().upper()
+        name = str(state.get("BASENAME") or "").strip()
+        if not abbrev:
+            return {}, False
+
+        return {
+            "state_abbrev": abbrev,
+            "state_name": name or abbrev,
+        }, True
+    except Exception:
+        return {}, False
+
+
+def infer_streamstats_region(lat: float, lon: float) -> str:
+    """
+    Infer the StreamStats region code for a point from its state/territory.
+    """
+    state, is_live = reverse_geocode_state(lat, lon)
+    if not is_live or not state.get("state_abbrev"):
+        raise RuntimeError("Could not determine the StreamStats state/region for the selected point.")
+    return state["state_abbrev"]
+
+
+def delineate_watershed(lat: float, lon: float, region: str | None = None) -> dict:
     """
     Delineate watershed using USGS StreamStats API.
 
@@ -317,6 +371,7 @@ def delineate_watershed(lat: float, lon: float, region: str = "OK") -> dict:
       "area_sqmi": float
     Raises RuntimeError on failure.
     """
+    region = (region or infer_streamstats_region(lat, lon)).upper()
     url = f"{_SS_BASE}/ss-delineate/v1/delineate/sshydro/{region}"
     params = {
         "lat": lat,
@@ -367,6 +422,7 @@ def delineate_watershed(lat: float, lon: float, region: str = "OK") -> dict:
         "workspace_id": workspace_id,
         "geojson": boundary_geojson,
         "area_sqmi": area_sqmi,
+        "region": region,
         "request_url": resp.url,
     }
 
@@ -910,9 +966,22 @@ _DEM_EXPORT_IMAGE = (
     "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/"
     "ImageServer/exportImage"
 )
+_DEM_WARMUP_URLS = (
+    "https://apps.nationalmap.gov/viewer/",
+    "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer",
+)
 _DEM_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; LID-Peak-Runoff-Tool/1.0)",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
     "Accept": "image/tiff,application/octet-stream;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://apps.nationalmap.gov/viewer/",
+    "Origin": "https://apps.nationalmap.gov",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
 }
 
 # Module-level sentinel: reset to False whenever this module is (re)loaded.
@@ -1124,10 +1193,20 @@ def _download_dem_geotiff_bytes(
     Does NOT raise exceptions — returns None bytes so calling code can handle gracefully.
     """
     errors: list[str] = []
+    session = requests.Session()
+    session.headers.update(_DEM_HEADERS)
+
+    # Warm the session first; hosted environments sometimes get denied on the
+    # direct raster request unless the service sees a browser-like navigation.
+    for warmup_url in _DEM_WARMUP_URLS:
+        try:
+            session.get(warmup_url, timeout=20)
+        except Exception:
+            pass
 
     # Primary: WCS GetCoverage (works in many local setups).
     try:
-        resp = requests.get(
+        resp = session.get(
             _DEM_WCS,
             params={
                 "SERVICE":  "WCS",
@@ -1141,8 +1220,6 @@ def _download_dem_geotiff_bytes(
                 "FORMAT":   "GeoTIFF",
             },
             timeout=90,
-            stream=True,
-            headers=_DEM_HEADERS,
         )
         resp.raise_for_status()
         content_type = (resp.headers.get("Content-Type") or "").lower()
@@ -1159,7 +1236,7 @@ def _download_dem_geotiff_bytes(
 
     # Fallback: ArcGIS ImageServer exportImage (often works when WCS is blocked).
     try:
-        resp = requests.get(
+        resp = session.get(
             _DEM_EXPORT_IMAGE,
             params={
                 "bbox": f"{bbox_w},{bbox_s},{bbox_e},{bbox_n}",
@@ -1173,8 +1250,6 @@ def _download_dem_geotiff_bytes(
                 "f": "image",
             },
             timeout=90,
-            stream=True,
-            headers=_DEM_HEADERS,
         )
         resp.raise_for_status()
         content_type = (resp.headers.get("Content-Type") or "").lower()

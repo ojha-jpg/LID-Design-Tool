@@ -2,7 +2,7 @@
 app_peak.py — LID Peak Runoff Tool
 
 5-step workflow:
-  1. Select a point on the Oklahoma stream network
+  1. Select a point on the stream network
   2. Delineate the watershed (USGS StreamStats)
   3. Collect data: Atlas 14 precipitation, SSURGO soils, NLCD land use
   4. Calculate composite CN, C, and peak flows (CN method + Rational method)
@@ -82,14 +82,15 @@ from api_clients import (
     fetch_soil_geodataframe,
     fetch_nlcd_array,
     fetch_dem_features,
+    reverse_geocode_state,
 )
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-OKLAHOMA_CENTER = [35.5, -97.5]
-DEFAULT_ZOOM = 7
+USA_CENTER = [39.8283, -98.5795]
+DEFAULT_ZOOM = 4
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -117,7 +118,7 @@ def _init_state():
         "nlcd_arr": None,              # np.ndarray — clipped NLCD pixel codes
         "usgs_flows": None,       # list from get_peak_flow_regression()
         "tc_hr": 0.5,             # time of concentration (hours) — set from StreamStats TLAG or default 30 min
-        "map1_center": OKLAHOMA_CENTER,
+        "map1_center": USA_CENTER,
         "map1_zoom": DEFAULT_ZOOM,
         "storm_duration_hr": 24,  # CN method design storm duration (hours)
         "lag_L_ft":   None,       # SCS lag: flow length (ft) — from DEM
@@ -1231,7 +1232,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 
 <!-- ===== 6. ATLAS 14 PRECIPITATION ===== -->
 <h2>6. NOAA Atlas 14 Precipitation Frequency</h2>
-<p>Point precipitation depths (inches) at the watershed centroid from NOAA Atlas 14 Volume&nbsp;8 (Oklahoma).</p>
+<p>Point precipitation depths (inches) at the watershed centroid from NOAA Atlas 14.</p>
 {atlas_html if atlas_html else "<p>Not available.</p>"}
 
 <!-- ===== 7. CN METHOD ===== -->
@@ -1265,9 +1266,9 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 <!-- ===== 10. ASSUMPTIONS & LIMITATIONS ===== -->
 <h2>10. Assumptions and Limitations</h2>
 <ul>
-  <li>Watershed delineated via USGS StreamStats using the NHDPlus stream network and 10-m DEM (CONUS).</li>
+  <li>Watershed delineated via USGS StreamStats using the regional stream network and elevation products available for the selected state/territory.</li>
   <li>Soil hydrologic group from SSURGO (gSSURGO, USDA-NRCS). Land use from NLCD 2024.</li>
-  <li>Precipitation from NOAA Atlas 14 Volume 8 (Oklahoma). 90% confidence bounds not shown.</li>
+  <li>Precipitation from NOAA Atlas 14 point precipitation frequency estimates. 90% confidence bounds not shown.</li>
   <li>CN method routes incremental SCS Type II runoff through the SCS dimensionless unit hydrograph (NEH-4 Table 16-2).</li>
   <li>Rational Method (Q = CIA) is most reliable for small, highly impervious watersheds (&lt; 640 ac).</li>
   <li>AMC II (average antecedent moisture conditions) assumed throughout.</li>
@@ -1340,7 +1341,7 @@ def _render_step1_map():
     if st.session_state["selected_lat"] is not None:
         _map_center = [st.session_state["selected_lat"], st.session_state["selected_lon"]]
     else:
-        _map_center = st.session_state.get("map1_center") or OKLAHOMA_CENTER
+        _map_center = st.session_state.get("map1_center") or USA_CENTER
     _map_zoom = st.session_state.get("map1_zoom") or DEFAULT_ZOOM
 
     # ---- Build Folium map ------------------------------------------------
@@ -1404,7 +1405,7 @@ def _render_step1_map():
 def main() -> None:
     _init_state()
 
-    st.title("LID Peak Runoff Tool — Oklahoma")
+    st.title("LID Peak Runoff Tool")
     st.caption("Produces peak discharge (cfs) via Curve Number and Rational methods.")
 
     if st.button("Reset / Start Over", type="secondary"):
@@ -1469,12 +1470,14 @@ def main() -> None:
                             centroid_upload = ws_geom_upload.centroid
                             lat_upload = centroid_upload.y
                             lon_upload = centroid_upload.x
+                            _upload_state, _upload_state_live = reverse_geocode_state(lat_upload, lon_upload)
 
                             # Build watershed dict compatible with the rest of the app
                             watershed_from_upload = {
                                 "workspace_id": "N/A",
                                 "geojson": fc,
                                 "area_sqmi": round(area_sqmi, 4),
+                                "region": _upload_state.get("state_abbrev") if _upload_state_live else None,
                                 "request_url": f"(uploaded {source_fmt}: {uploaded.name})",
                             }
 
@@ -1512,16 +1515,16 @@ def main() -> None:
             # --- Manual lat/lon input ---
             with st.form("manual_coords", clear_on_submit=False):
                 ci, cj = st.columns(2)
-                manual_lat = ci.text_input("Latitude", placeholder="e.g. 35.4676")
-                manual_lon = cj.text_input("Longitude", placeholder="e.g. -97.5164")
+                manual_lat = ci.text_input("Latitude", placeholder="e.g. 39.0997")
+                manual_lon = cj.text_input("Longitude", placeholder="e.g. -94.5786")
                 submitted = st.form_submit_button("Use These Coordinates")
 
             if submitted:
                 try:
                     lat_val = float(manual_lat)
                     lon_val = float(manual_lon)
-                    if not (33.0 <= lat_val <= 37.5) or not (-103.5 <= lon_val <= -94.0):
-                        st.warning("Coordinates appear to be outside Oklahoma. Check your values.")
+                    if not (-90.0 <= lat_val <= 90.0) or not (-180.0 <= lon_val <= 180.0):
+                        st.warning("Coordinates must be valid decimal latitude/longitude values.")
                     else:
                         st.session_state["selected_lat"] = lat_val
                         st.session_state["selected_lon"] = lon_val
@@ -1546,7 +1549,10 @@ def main() -> None:
                     try:
                         result = delineate_watershed(lat, lon)
                         st.session_state["watershed"]   = result
-                        basin_chars = get_basin_characteristics(result["workspace_id"])
+                        basin_chars = get_basin_characteristics(
+                            result["workspace_id"],
+                            region=result.get("region", "OK"),
+                        )
                         st.session_state["basin_chars"] = basin_chars
                     except Exception as e:
                         st.error(f"StreamStats delineation failed: {e}")
@@ -1556,9 +1562,20 @@ def main() -> None:
             # ── Results display (watershed already in session state) ────────────
             result     = st.session_state["watershed"]
             basin_chars = st.session_state["basin_chars"]
+            region_code = result.get("region")
+            region_name = None
+            if region_code and lat is not None and lon is not None:
+                _state_info, _state_live = reverse_geocode_state(lat, lon)
+                if _state_live:
+                    region_name = _state_info.get("state_name")
 
             if result.get("request_url"):
                 st.caption(result["request_url"])
+            if region_code:
+                st.caption(
+                    f"StreamStats region: **{region_code}**"
+                    + (f" ({region_name})" if region_name else "")
+                )
 
             area_sqmi  = result.get("area_sqmi") or basin_chars.get("DRNAREA", 0)
             tlag       = basin_chars.get("TLAG", None)
@@ -1669,9 +1686,10 @@ def main() -> None:
 
             if st.session_state.get("usgs_flows") is None:
                 _ws_id = watershed.get("workspace_id")
+                _region = watershed.get("region", "OK")
                 if _ws_id and _ws_id != "N/A":
                     with st.spinner("Fetching regression flows..."):
-                        st.session_state["usgs_flows"] = get_peak_flow_regression(_ws_id)
+                        st.session_state["usgs_flows"] = get_peak_flow_regression(_ws_id, region=_region)
                 else:
                     st.session_state["usgs_flows"] = []
 
