@@ -1,7 +1,9 @@
 """
-hydrology.py — Pure hydrology calculation functions for the LID Peak Runoff Tool.
+hydrology.py — shared hydrology calculations for the Peak Runoff workflow.
 
-All functions are unit-explicit. No external API calls here.
+The functions in this module are deliberately side-effect free and unit-explicit.
+They translate already-fetched precipitation, soil, land-use, and watershed
+metrics into CN, Rational Method, and hydrograph outputs without doing any I/O.
 """
 
 import bisect
@@ -23,12 +25,13 @@ def composite_cn(
     landuse_pct: dict[str, float],
 ) -> float:
     """
-    Area-weighted composite curve number.
+    Area-weighted composite curve number using marginal percentages.
 
     soil_pct:    {"A": 15.0, "B": 45.0, "C": 30.0, "D": 10.0}  (sums to 100)
     landuse_pct: {"Row Crops": 60.0, "Pasture/Meadow": 40.0}     (sums to 100)
 
     Returns composite CN (dimensionless).
+    This path assumes land use and soil group are statistically independent.
     """
     cn = 0.0
     soil_fracs = {g: pct / 100.0 for g, pct in soil_pct.items()}
@@ -315,6 +318,8 @@ def scs_uh_peak_flow(
     Tc_hr       : time of concentration (hours)
     duration_hr : design storm duration (hours)
     dt          : time step (hours, default 0.25)
+
+    This is the primary CN-based peak-flow path used by ``app_peak.py``.
     """
     tbl = build_storm_table(P_D, duration_hr, CN, dt)
     incr_runoff = [row["Incremental Effective Runoff (in)"] for row in tbl]

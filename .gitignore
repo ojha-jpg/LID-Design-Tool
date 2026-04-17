@@ -19,7 +19,12 @@ scripts/
 test_sripts/
 random/
 notes/
-docs/
+docs/*
+!docs/architecture.md
+!docs/tool-reference.md
+!docs/hydrology-and-methods.md
+!docs/integrations-and-data.md
+!docs/developer-guide.md
 
 # Python cache
 __pycache__/

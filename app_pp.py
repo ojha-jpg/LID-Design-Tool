@@ -468,7 +468,7 @@ def verify_orifice_detention(
 # ============================================================================
 
 def generate_pdf_report(inputs: dict, results: dict) -> bytes:
-    """Generate a compact 1-page PDF summary of the PP design."""
+    """Generate a compact 1-page PDF summary of the current PP design state."""
     buf = io.BytesIO()
     styles = getSampleStyleSheet()
 
@@ -669,6 +669,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 # ============================================================================
 
 def main() -> None:
+    """Render the PP workflow, validation checks, and PDF export."""
     _init_state()
 
     st.title("Permeable Pavement (PP) Design Tool")
@@ -854,6 +855,8 @@ def main() -> None:
     # ========================================================================
     # CALCULATIONS
     # ========================================================================
+    # The UI is intentionally live-calculated. Every rerun recomputes design
+    # adequacy from the current inputs before rendering status or report output.
 
     # SWV
     swv_required = calculate_swv(

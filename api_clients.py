@@ -1,14 +1,11 @@
 """
-api_clients.py — All external API integrations for the LID Peak Runoff Tool.
+api_clients.py — external-service boundary for the LID tool suite.
 
-Functions:
-  delineate_watershed()       — USGS StreamStats delineation
-  get_basin_characteristics() — USGS StreamStats basin chars (area, Tc)
-  get_peak_flow_regression()  — USGS NSS regression peak flows
-  fetch_atlas14()             — NOAA Atlas 14 precipitation
-  fetch_soil_composition()    — USDA SSURGO hydrologic soil groups (SDA API)
-  fetch_soil_texture()        — USDA SSURGO surface soil texture (SDA API)
-  fetch_landuse_composition() — NLCD 2024 land use within watershed (MRLC WCS API)
+This module centralizes runtime integrations so the Streamlit pages can treat
+public services as typed helpers instead of embedding request logic in the UI.
+Most functions return ``(payload, is_live)`` when a degraded-but-usable result
+is possible, and raise or return structured errors when the caller should
+decide whether to stop, warn, or fall back.
 """
 
 import json
@@ -805,7 +802,8 @@ def fetch_landuse_soil_intersection(watershed_geojson: dict) -> tuple[dict, bool
     and land-use fractions are simply multiplied together.
 
     Returns ({(lu_key, hsg): area_pct}, is_live: bool) where area_pct values
-    sum to ~100.  Falls back to ({}, False) if either local dataset fails.
+    sum to ~100. The Peak Runoff page treats ``({}, False)`` as a signal to
+    fall back to separate soil and land-use composition queries.
     """
     try:
         from rasterio.features import rasterize as rio_rasterize
@@ -1304,6 +1302,8 @@ def fetch_dem_features(
         except Exception as exc:
             py3dep_errors.append(f"py3dep failed: {type(exc).__name__}: {exc}")
 
+        # Fall back to the older direct-download path only when the py3dep
+        # workflow cannot provide a usable DEM for analysis and display.
         if ws_mask is None or display_array is None or dem_bounds is None or res_mx is None or res_my is None:
             centre_lat = (miny + maxy) / 2.0
             m_per_deg_lon = 111_320.0 * np.cos(np.radians(centre_lat))

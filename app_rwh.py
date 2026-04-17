@@ -194,7 +194,7 @@ def select_tank(vol_total_gal: float, df: pd.DataFrame):
 # ============================================================================
 
 def generate_pdf_report(inputs: dict, results: dict) -> bytes:
-    """Generate a compact PDF summary of the RWH design."""
+    """Generate a compact PDF summary of the current RWH design state."""
     buf = io.BytesIO()
     styles = getSampleStyleSheet()
 
@@ -394,6 +394,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 # ============================================================================
 
 def main() -> None:
+    """Render the RWH workflow, tank selection, checks, and PDF export."""
     st.title("Rainwater Harvesting (RWH) Design Tool")
     st.caption("City of Tulsa LID Manual (2026) — Section 104 · Design Process")
 
@@ -510,6 +511,8 @@ def main() -> None:
     # ========================================================================
     # CALCULATIONS  (volumes already computed above for tank auto-selection)
     # ========================================================================
+    # Volume calculations are reused for both automatic tank preselection and
+    # validation of whatever dimensions the user keeps or edits afterward.
     vol_sw    = _vol_sw
     vol_ff    = _vol_ff
     vol_other = _vol_other

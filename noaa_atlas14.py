@@ -1,5 +1,5 @@
 """
-noaa_atlas14.py — NOAA Atlas 14 precipitation frequency data fetcher + interpolator.
+noaa_atlas14.py — NOAA Atlas 14 precipitation frequency fetcher and interpolator.
 
 Usage:
     from noaa_atlas14 import fetch_idf
@@ -8,8 +8,9 @@ Usage:
     depth   = idf.depth(duration_hr=3, ari_yr=5)    # → inches (3-hr, 5-yr storm)
     intensity = idf.intensity(duration_hr=1, ari_yr=100)  # → in/hr
 
-Interpolation is bilinear in log-log space (log duration, log return period),
-which matches the linearity of IDF curves on standard log-log paper.
+The current implementation parses the CSV response into a gridded depth table
+and uses SciPy's ``RegularGridInterpolator`` over the raw duration/return-period
+grid. ``IDF.intensity(...)`` is then derived as ``depth / duration``.
 
 Data source: NOAA Atlas 14 Point Precipitation Frequency Estimates
   https://hdsc.nws.noaa.gov/cgi-bin/hdsc/new/fe_text_mean.csv
@@ -43,7 +44,7 @@ def _parse_duration_hr(label: str) -> float:
 
 class IDF:
     """
-    Precipitation frequency table for a single point, with log-log interpolation.
+    Precipitation frequency table for a single point.
 
     Attributes
     ----------
@@ -62,7 +63,7 @@ class IDF:
         self.ari_years = ari_years
         self.depths_in = depths_in
 
-        # Build linear interpolator (on raw values)
+        # Build a raw-value interpolator over duration and return-period axes.
         self._interp = RegularGridInterpolator(
             (durations_hr, ari_years), depths_in,
             method="linear",

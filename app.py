@@ -1,9 +1,9 @@
 """
-LID Design Tools — Combined Application
-City of Tulsa Low Impact Development (LID) Manual (2026)
+LID Design Tools — combined Streamlit application shell.
 
-Entry point for all tools.
-Run with:  streamlit run app.py
+This module intentionally stays thin: it configures the Streamlit app,
+registers page entrypoints from the tool modules, and exposes a home page that
+routes users into the four workflows. Domain logic lives in the page modules.
 """
 
 import streamlit as st
@@ -19,6 +19,7 @@ from app_peak import main as peak_main
 # ============================================================================
 
 def homepage() -> None:
+    """Render the landing page and route users into the registered tools."""
     st.title("LID Design Tools")
     st.markdown(
         "**City of Tulsa Low Impact Development (LID) Manual (2026)**  \n"
@@ -90,6 +91,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Keep page registration centralized here so navigation and documentation stay
+# aligned even as the individual tool modules evolve independently.
 home_page = st.Page(homepage,  title="Home",                        icon="🏠", url_path="home",  default=True)
 brc_page  = st.Page(brc_main,  title="Bioretention Cell (BRC)",     icon="🌱", url_path="brc")
 pp_page   = st.Page(pp_main,   title="Permeable Pavement (PP)",     icon="🧱", url_path="pp")

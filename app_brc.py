@@ -627,7 +627,7 @@ def verify_orifice_detention(
 # ============================================================================
 
 def generate_pdf_report(inputs: dict, results: dict) -> bytes:
-    """Generate a compact 1-page PDF summary of the BRC design."""
+    """Generate a compact 1-page PDF summary of the current BRC design state."""
     buf = io.BytesIO()
     styles = getSampleStyleSheet()
 
@@ -857,6 +857,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 # ============================================================================
 
 def main() -> None:
+    """Render the BRC workflow, calculations, validation, and PDF export."""
     _init_state()
 
     st.title("Bio-Retention Cell (BRC) Design Tool")
@@ -1090,6 +1091,8 @@ def main() -> None:
     # ========================================================================
     # CALCULATIONS
     # ========================================================================
+    # The page recalculates from the current form state on every rerun so the
+    # metrics, validation banners, and downloadable PDF always stay in sync.
 
     swv_required = calculate_swv(impervious_area, brc_area, precip_depth)
 

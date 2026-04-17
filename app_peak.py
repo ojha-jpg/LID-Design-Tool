@@ -18,8 +18,8 @@ import time
 import zipfile
 import xml.etree.ElementTree as ET
 
-# PROJ environment — must be set before any geospatial imports
 def _find_proj_data():
+    """Return a likely local PROJ data directory for geospatial dependencies."""
     candidates = [
         os.path.join(sys.prefix, "share", "proj"),  # conda/venv on any OS
         "/opt/homebrew/share/proj",
@@ -100,6 +100,7 @@ DEFAULT_ZOOM = 7
 # ---------------------------------------------------------------------------
 
 def _init_state():
+    """Seed the Peak Runoff finite-state workflow in ``st.session_state``."""
     defaults = {
         "step": 1,
         "selected_lat": None,
@@ -205,6 +206,7 @@ def _build_landuse_cn_table(
 # ---------------------------------------------------------------------------
 
 def _reset():
+    """Reset the wizard while preserving the current map viewport."""
     _keep = {"map1_center", "map1_zoom"}   # preserve viewport across resets
     for k in list(st.session_state.keys()):
         if k not in _keep and k != "step":
@@ -839,7 +841,10 @@ def render_dem_static(dem_features: dict, ws_geom):
 def _generate_report_html() -> bytes:
     """
     Build a self-contained HTML report from current session state.
-    Returns UTF-8 encoded bytes for st.download_button.
+
+    Report generation reuses the cached session-state payload assembled during
+    the wizard so the downloaded artifact reflects the exact results the user
+    reviewed onscreen without re-fetching external services.
     """
     import base64
     from io import BytesIO
@@ -1402,6 +1407,7 @@ def _render_step1_map():
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    """Run the five-step Peak Runoff workflow."""
     _init_state()
 
     st.title("LID Peak Runoff Tool — Oklahoma")
@@ -1425,6 +1431,9 @@ def main() -> None:
             st.error(st.session_state["error"])
 
     with col_main:
+        # The page is implemented as a simple step-driven state machine. Each
+        # branch below assumes prior steps have already populated the required
+        # session-state keys.
 
         # -----------------------------------------------------------------------
         # Step 1 — Point selection on map or manual lat/lon entry
@@ -1612,6 +1621,8 @@ def main() -> None:
             lon = st.session_state["selected_lon"]
             watershed = st.session_state["watershed"]
 
+            # Each expensive fetch is cached independently so reruns only fill
+            # missing pieces instead of replaying the full collection step.
             if st.session_state.get("atlas14") is None:
                 with st.spinner("Fetching precipitation data..."):
                     try:
@@ -1840,6 +1851,8 @@ def main() -> None:
             _ss_area   = watershed.get("area_sqmi") or basin_chars.get("DRNAREA", 0)
             tc         = st.session_state.get("tc_hr", 1.0)
 
+            # Prefer the exact NLCD x SSURGO intersection when available. The
+            # marginal soil/land-use composition path remains as a fallback.
             # Composite CN — use spatial intersection when available
             if intersection:
                 CN = composite_cn_from_intersection(intersection)
