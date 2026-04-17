@@ -924,6 +924,19 @@ _PY3DEP_RESOLUTION_M = 30
 _DEM_BBOX_BUFFER_DEG = 0.02
 
 
+def _patch_numpy_compat() -> None:
+    """Restore NumPy aliases removed in 2.x that older geospatial deps still call."""
+    if not hasattr(np, "in1d"):
+        def _in1d(ar1, ar2, assume_unique=False, invert=False):
+            return np.isin(
+                np.asarray(ar1).ravel(),
+                ar2,
+                assume_unique=assume_unique,
+                invert=invert,
+            )
+        np.in1d = _in1d  # type: ignore[attr-defined]
+
+
 def _patch_numpy_for_pysheds():
     """
     Patch np.can_cast once per module-load for NumPy 2 / pysheds 0.4 (NEP-50).
@@ -934,6 +947,7 @@ def _patch_numpy_for_pysheds():
     global _NUMPY_PATCHED
     if _NUMPY_PATCHED:
         return
+    _patch_numpy_compat()
     _orig = np.can_cast
 
     import math as _math
@@ -1243,6 +1257,7 @@ def fetch_dem_features(
         py3dep_errors: list[str] = []
 
         try:
+            _patch_numpy_compat()
             import py3dep
 
             dem_da = py3dep.get_dem(
