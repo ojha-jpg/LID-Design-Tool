@@ -146,8 +146,8 @@ SCS_TYPE_II_MASS_CURVE: list[tuple[float, float]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# SCS Dimensionless Unit Hydrograph — NEH-4 Table 16-2
-# (t/tp, q/qp) pairs; q/qp = 0 outside [0, 5·tp]
+# SCS Dimensionless Unit Hydrograph — NEH Part 630, Chapter 16, Table 16-1
+# Discharge-ratio ordinates stored as (t/Tp, q/qp) pairs; q/qp = 0 outside [0, 5·Tp]
 # ---------------------------------------------------------------------------
 
 SCS_DUH: list[tuple[float, float]] = [
@@ -180,4 +180,3 @@ SCS_DUH: list[tuple[float, float]] = [
     (4.5, 0.005),
     (5.0, 0.000),
 ]
-
