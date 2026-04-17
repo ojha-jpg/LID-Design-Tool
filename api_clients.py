@@ -920,6 +920,21 @@ _DEM_HEADERS = {
 # hot-reload of api_clients.py always re-applies the patch to the live numpy
 # object, avoiding stale/buggy patches surviving across reloads.
 _NUMPY_PATCHED: bool = False
+_PY3DEP_RESOLUTION_M = 30
+_DEM_BBOX_BUFFER_DEG = 0.02
+
+
+def _patch_numpy_compat() -> None:
+    """Restore NumPy aliases removed in 2.x that older geospatial deps still call."""
+    if not hasattr(np, "in1d"):
+        def _in1d(ar1, ar2, assume_unique=False, invert=False):
+            return np.isin(
+                np.asarray(ar1).ravel(),
+                ar2,
+                assume_unique=assume_unique,
+                invert=invert,
+            )
+        np.in1d = _in1d  # type: ignore[attr-defined]
 
 
 def _patch_numpy_for_pysheds():
@@ -932,6 +947,7 @@ def _patch_numpy_for_pysheds():
     global _NUMPY_PATCHED
     if _NUMPY_PATCHED:
         return
+    _patch_numpy_compat()
     _orig = np.can_cast
 
     import math as _math
@@ -953,6 +969,147 @@ def _patch_numpy_for_pysheds():
     _NUMPY_PATCHED = True
 
 
+def _dataarray_to_2d_numpy(data_array, dtype=float) -> np.ndarray:
+    """Convert a rioxarray-backed DataArray to a plain 2D NumPy array."""
+    values = np.asarray(np.ma.filled(np.squeeze(data_array.values), np.nan), dtype=dtype)
+    if values.ndim != 2:
+        raise ValueError(f"Expected a 2D DEM raster, got shape {values.shape}")
+
+    nodata = data_array.rio.nodata
+    if nodata is not None and np.isfinite(nodata):
+        values[np.isclose(values, float(nodata))] = np.nan
+    return values
+
+
+def _mask_geometry_to_raster(
+    geom,
+    geom_crs,
+    raster_crs,
+    raster_transform,
+    out_shape: tuple[int, int],
+) -> np.ndarray:
+    """Return a boolean mask with True for cells inside the input geometry."""
+    from rasterio.features import geometry_mask as _geom_mask
+
+    raster_crs_text = str(raster_crs)
+    geom_crs_text = str(geom_crs)
+    geom_for_raster = geom
+    if geom_crs_text != raster_crs_text:
+        transformer = Transformer.from_crs(geom_crs, raster_crs, always_xy=True)
+        geom_for_raster = shp_transform(transformer.transform, geom)
+
+    return ~_geom_mask(
+        [geom_for_raster.__geo_interface__],
+        out_shape=out_shape,
+        transform=raster_transform,
+        all_touched=True,
+    )
+
+
+def _write_float_dem_raster(path: str, dem_data: np.ndarray, transform, crs, nodata: float) -> None:
+    """Write a 2D float DEM to GeoTIFF for downstream pysheds processing."""
+    import rasterio
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=dem_data.shape[0],
+        width=dem_data.shape[1],
+        count=1,
+        dtype="float32",
+        crs=crs,
+        transform=transform,
+        nodata=float(nodata),
+    ) as dst:
+        dst.write(dem_data.astype(np.float32), 1)
+
+
+def _compute_dem_metrics(tmp_dem: str, ws_mask: np.ndarray, res_mx: float, res_my: float, nodata: float) -> tuple[dict, str | None]:
+    """Run pysheds on a prepared DEM raster and summarize watershed metrics."""
+    _patch_numpy_for_pysheds()
+    from pysheds.grid import Grid
+
+    grid = Grid.from_raster(tmp_dem)
+    dem_r = grid.read_raster(tmp_dem)
+    inflated = grid.resolve_flats(
+        grid.fill_depressions(grid.fill_pits(dem_r))
+    )
+    fdir = grid.flowdir(inflated)
+    acc = grid.accumulation(fdir)
+
+    dem_full = np.array(grid.view(inflated), dtype=float)
+    dem_full[dem_full == float(nodata)] = np.nan
+    elev_ws = np.where(ws_mask, dem_full, np.nan)
+
+    fdir_np = np.array(fdir, dtype=np.int32)
+    acc_np = np.array(acc, dtype=float)
+    dem_height, dem_width = ws_mask.shape
+    d8_offsets = {
+        64: (-1, 0), 128: (-1, 1),
+        1: (0, 1), 2: (1, 1),
+        4: (1, 0), 8: (1, -1),
+        16: (0, -1), 32: (-1, -1),
+    }
+    ws_rows, ws_cols = np.where(ws_mask)
+    exit_rows, exit_cols = [], []
+    for r, c in zip(ws_rows.tolist(), ws_cols.tolist()):
+        offset = d8_offsets.get(int(fdir_np[r, c]))
+        if offset is None:
+            continue
+        nr, nc = r + offset[0], c + offset[1]
+        if not (0 <= nr < dem_height and 0 <= nc < dem_width and ws_mask[nr, nc]):
+            exit_rows.append(r)
+            exit_cols.append(c)
+
+    if exit_rows:
+        best = int(np.argmax(acc_np[exit_rows, exit_cols]))
+        row_out, col_out = exit_rows[best], exit_cols[best]
+    else:
+        acc_in_ws = np.where(ws_mask, acc_np, -np.inf)
+        row_out, col_out = np.unravel_index(np.argmax(acc_in_ws), acc_in_ws.shape)
+
+    flow_length_ft = None
+    flow_warning = None
+    try:
+        dist_arr = grid.distance_to_outlet(
+            x=col_out, y=row_out, fdir=fdir, xytype="index"
+        )
+        dist_np = np.array(dist_arr, dtype=float)
+        if hasattr(dist_arr, "nodata") and dist_arr.nodata is not None:
+            dist_np[dist_np == float(dist_arr.nodata)] = np.nan
+        dist_np[~np.isfinite(dist_np)] = np.nan
+        cell_size_m = np.sqrt(res_mx * res_my)
+        ws_dist = dist_np[ws_mask]
+        if ws_mask.any() and np.any(np.isfinite(ws_dist)):
+            max_steps = float(np.nanmax(ws_dist))
+            if np.isfinite(max_steps) and max_steps > 0:
+                flow_length_ft = max_steps * cell_size_m * 3.28084
+            else:
+                flow_warning = f"D8 flow length = {max_steps} steps (degenerate)"
+        else:
+            flow_warning = "D8 routing produced no finite distances within watershed"
+    except Exception as exc:
+        flow_warning = str(exc)
+
+    dy_e, dx_e = np.gradient(elev_ws, res_my, res_mx)
+    slope_pct = np.sqrt(dx_e**2 + dy_e**2) * 100.0
+    valid_mask = ws_mask & np.isfinite(slope_pct)
+    mean_slope = float(np.nanmean(slope_pct[valid_mask])) if valid_mask.any() else 0.0
+
+    elev_valid = elev_ws[np.isfinite(elev_ws)]
+    elev_min_m = float(np.nanmin(elev_valid)) if elev_valid.size > 0 else 0.0
+    elev_max_m = float(np.nanmax(elev_valid)) if elev_valid.size > 0 else 0.0
+
+    metrics = {
+        "flow_length_ft": round(flow_length_ft, 1) if flow_length_ft is not None else None,
+        "mean_slope_pct": round(mean_slope, 2),
+        "elev_min_m": round(elev_min_m, 1),
+        "elev_max_m": round(elev_max_m, 1),
+    }
+    return metrics, flow_warning
+
+
 def _download_dem_geotiff_bytes(
     bbox_w: float,
     bbox_s: float,
@@ -960,8 +1117,12 @@ def _download_dem_geotiff_bytes(
     bbox_n: float,
     width: int = 300,
     height: int = 300,
-) -> tuple[bytes, str]:
-    """Download DEM GeoTIFF bytes with endpoint fallback for hosted environments."""
+) -> tuple[bytes | None, str | None]:
+    """Download DEM GeoTIFF bytes with endpoint fallback for hosted environments.
+    
+    Returns (bytes, source) on success, (None, error_msg) on any error (including 403).
+    Does NOT raise exceptions — returns None bytes so calling code can handle gracefully.
+    """
     errors: list[str] = []
 
     # Primary: WCS GetCoverage (works in many local setups).
@@ -988,8 +1149,13 @@ def _download_dem_geotiff_bytes(
         if "image" in content_type or "tiff" in content_type or "octet-stream" in content_type:
             return resp.content, "WCS"
         errors.append(f"WCS unexpected content-type: {content_type or 'unknown'}")
+    except requests.exceptions.HTTPError as exc:
+        if exc.response.status_code == 403:
+            errors.append("WCS 403 Forbidden (likely blocked by USGS for Streamlit hosting)")
+        else:
+            errors.append(f"WCS HTTP {exc.response.status_code}")
     except Exception as exc:
-        errors.append(f"WCS failed: {exc}")
+        errors.append(f"WCS failed: {type(exc).__name__}: {exc}")
 
     # Fallback: ArcGIS ImageServer exportImage (often works when WCS is blocked).
     try:
@@ -1015,10 +1181,16 @@ def _download_dem_geotiff_bytes(
         if "image" in content_type or "tiff" in content_type or "octet-stream" in content_type:
             return resp.content, "exportImage"
         errors.append(f"exportImage unexpected content-type: {content_type or 'unknown'}")
+    except requests.exceptions.HTTPError as exc:
+        if exc.response.status_code == 403:
+            errors.append("exportImage 403 Forbidden (likely blocked by USGS for Streamlit hosting)")
+        else:
+            errors.append(f"exportImage HTTP {exc.response.status_code}")
     except Exception as exc:
-        errors.append(f"exportImage failed: {exc}")
+        errors.append(f"exportImage failed: {type(exc).__name__}: {exc}")
 
-    raise RuntimeError("3DEP DEM download failed; " + " | ".join(errors))
+    # Return None instead of raising, so calling code can handle gracefully
+    return None, "3DEP DEM unavailable; " + " | ".join(errors)
 
 
 def fetch_dem_features(
@@ -1027,12 +1199,11 @@ def fetch_dem_features(
     pour_lon: float | None = None,
 ) -> tuple[dict, bool]:
     """
-    Download USGS 3DEP 1/3 arc-second DEM and compute DEM-based watershed features.
+    Fetch a USGS 3DEP DEM and compute DEM-based watershed features.
 
-    Uses the StreamStats watershed boundary (watershed_geojson) as the analysis mask.
-    Runs pysheds D8 routing on the full downloaded DEM tile (no clip_to), snaps the
-    pour point to the nearest high-accumulation cell, then calls distance_to_outlet to
-    get the longest flow path within the StreamStats boundary.
+    The primary path uses the HyRiver ``py3dep.get_dem`` workflow so hosted
+    deployments are not coupled to the raw ImageServer/WCS request logic.
+    The older direct-download path remains only as a fallback.
 
     Parameters
     ----------
@@ -1054,13 +1225,9 @@ def fetch_dem_features(
     import tempfile
     import os as _os
     import rasterio
-    from rasterio.features import geometry_mask as _geom_mask
 
     if watershed_geojson is None:
         return {"_error": "watershed_geojson is required"}, False
-
-    _patch_numpy_for_pysheds()
-    from pysheds.grid import Grid
 
     tmp_raw = tmp_dem = None
     try:
@@ -1072,154 +1239,137 @@ def fetch_dem_features(
             ws_shape = _sshape(watershed_geojson.get("geometry", watershed_geojson))
 
         minx, miny, maxx, maxy = ws_shape.bounds
-        buffer = 0.02   # ~2 km buffer so boundary cells are well inside the DEM tile
+        buffer = _DEM_BBOX_BUFFER_DEG
         bbox_w = minx - buffer
         bbox_e = maxx + buffer
         bbox_s = miny - buffer
         bbox_n = maxy + buffer
 
-        # Pixel resolution in metres at watershed centroid latitude
-        centre_lat   = (miny + maxy) / 2.0
-        m_per_deg_lon = 111_320.0 * np.cos(np.radians(centre_lat))
-        m_per_deg_lat = 111_320.0
-
-        # --- Download DEM (1/3 arc-second ~10 m) with endpoint fallback ---
-        dem_bytes, dem_source = _download_dem_geotiff_bytes(
-            bbox_w=bbox_w,
-            bbox_s=bbox_s,
-            bbox_e=bbox_e,
-            bbox_n=bbox_n,
-            width=300,
-            height=300,
-        )
-
-        fd, tmp_raw = tempfile.mkstemp(suffix="_dem_raw.tif")
-        with _os.fdopen(fd, "wb") as fh:
-            fh.write(dem_bytes)
-
-        # Rewrite with explicit float32 nodata so pysheds is happy
         NODATA = np.float32(-9999.0)
         fd2, tmp_dem = tempfile.mkstemp(suffix="_dem.tif")
         _os.close(fd2)
 
-        with rasterio.open(tmp_raw) as src:
-            res_x      = abs(src.res[0])
-            res_y      = abs(src.res[1])
-            res_mx     = res_x * m_per_deg_lon
-            res_my     = res_y * m_per_deg_lat
-            raw_data   = src.read(1).astype(np.float32)
-            dem_transform = src.transform
-            dem_height, dem_width = raw_data.shape
-            if src.nodata is not None:
-                raw_data[raw_data == src.nodata] = NODATA
-            meta = {**src.meta, "dtype": "float32", "nodata": float(NODATA)}
+        display_array = None
+        dem_bounds = None
+        dem_source = None
+        res_mx = res_my = None
+        ws_mask = None
+        py3dep_errors: list[str] = []
 
-        with rasterio.open(tmp_dem, "w", **meta) as dst:
-            dst.write(raw_data, 1)
-
-        # --- pysheds: condition DEM → D8 flow dir → accumulation (full tile, no clip) ---
-        grid     = Grid.from_raster(tmp_dem)
-        dem_r    = grid.read_raster(tmp_dem)
-        inflated = grid.resolve_flats(
-            grid.fill_depressions(grid.fill_pits(dem_r))
-        )
-        fdir = grid.flowdir(inflated)
-        acc  = grid.accumulation(fdir)
-
-        # --- Build watershed pixel mask from StreamStats GeoJSON ---
-        # geometry_mask returns True OUTSIDE shapes → invert to get inside=True
-        ws_mask = ~_geom_mask(
-            [ws_shape.__geo_interface__],
-            out_shape=(dem_height, dem_width),
-            transform=dem_transform,
-            all_touched=True,
-        )
-
-        # --- Masked elevation array (built first — used for outlet detection) ---
-        dem_full = np.array(grid.view(inflated), dtype=float)
-        dem_full[dem_full == float(NODATA)] = np.nan
-        elev_ws = np.where(ws_mask, dem_full, np.nan)
-
-        # --- Find outlet as the watershed exit cell with highest accumulation ---
-        # An "exit cell" is a watershed pixel whose D8 neighbor falls outside the
-        # watershed mask (or off the DEM tile edge).  These are the only cells
-        # guaranteed to be reachable by distance_to_outlet; among them we pick
-        # the one with the most accumulated flow, which is the true hydrological
-        # outlet regardless of where the original pour point was placed.
-        fdir_np = np.array(fdir, dtype=np.int32)
-        acc_np  = np.array(acc,  dtype=float)
-        _D8_OFFSETS = {
-            64: (-1,  0), 128: (-1,  1),
-             1: ( 0,  1),   2: ( 1,  1),
-             4: ( 1,  0),   8: ( 1, -1),
-            16: ( 0, -1),  32: (-1, -1),
-        }
-        ws_rows, ws_cols = np.where(ws_mask)
-        exit_rows, exit_cols = [], []
-        for r, c in zip(ws_rows.tolist(), ws_cols.tolist()):
-            offset = _D8_OFFSETS.get(int(fdir_np[r, c]))
-            if offset is None:
-                continue
-            nr, nc = r + offset[0], c + offset[1]
-            if not (0 <= nr < dem_height and 0 <= nc < dem_width and ws_mask[nr, nc]):
-                exit_rows.append(r)
-                exit_cols.append(c)
-
-        if exit_rows:
-            best = int(np.argmax(acc_np[exit_rows, exit_cols]))
-            row_out, col_out = exit_rows[best], exit_cols[best]
-        else:
-            # Fallback: highest-accumulation cell anywhere inside watershed
-            acc_in_ws = np.where(ws_mask, acc_np, -np.inf)
-            row_out, col_out = np.unravel_index(np.argmax(acc_in_ws), acc_in_ws.shape)
-
-        # --- Distance to outlet → flow length (best-effort) ---
-        L_ft = None
-        _flow_err = None
         try:
-            dist_arr = grid.distance_to_outlet(
-                x=col_out, y=row_out, fdir=fdir, xytype="index"
+            _patch_numpy_compat()
+            import py3dep
+
+            dem_da = py3dep.get_dem(
+                geometry=(bbox_w, bbox_s, bbox_e, bbox_n),
+                resolution=_PY3DEP_RESOLUTION_M,
+                crs=4326,
             )
-            dist_np = np.array(dist_arr, dtype=float)
-            if hasattr(dist_arr, "nodata") and dist_arr.nodata is not None:
-                dist_np[dist_np == float(dist_arr.nodata)] = np.nan
-            dist_np[~np.isfinite(dist_np)] = np.nan
-            cell_size_m = np.sqrt(res_mx * res_my)
-            _ws_dist = dist_np[ws_mask]
-            if ws_mask.any() and np.any(np.isfinite(_ws_dist)):
-                max_steps = float(np.nanmax(_ws_dist))
-                if np.isfinite(max_steps) and max_steps > 0:
-                    L_ft = max_steps * cell_size_m * 3.28084
-                else:
-                    _flow_err = f"D8 flow length = {max_steps} steps (degenerate)"
-            else:
-                _flow_err = "D8 routing produced no finite distances within watershed"
-        except Exception as _fe:
-            _flow_err = str(_fe)
+            dem_source = f"py3dep.get_dem ({_PY3DEP_RESOLUTION_M} m)"
 
-        # --- Mean basin slope from gradient of masked DEM ---
-        dy_e, dx_e = np.gradient(elev_ws, res_my, res_mx)
-        slope_pct  = np.sqrt(dx_e**2 + dy_e**2) * 100.0
-        valid_mask = ws_mask & np.isfinite(slope_pct)
-        mean_slope = float(np.nanmean(slope_pct[valid_mask])) if valid_mask.any() else 0.0
+            dem_analysis = dem_da.rio.reproject("EPSG:5070")
+            dem_display = dem_da.rio.reproject("EPSG:4326")
 
-        # --- Elevation stats ---
-        elev_valid = elev_ws[np.isfinite(elev_ws)]
-        elev_min_m = float(np.nanmin(elev_valid)) if elev_valid.size > 0 else 0.0
-        elev_max_m = float(np.nanmax(elev_valid)) if elev_valid.size > 0 else 0.0
+            analysis_data = _dataarray_to_2d_numpy(dem_analysis, dtype=np.float32)
+            display_data = _dataarray_to_2d_numpy(dem_display, dtype=float)
+            analysis_transform = dem_analysis.rio.transform()
+            display_transform = dem_display.rio.transform()
+            analysis_crs = dem_analysis.rio.crs
 
-        dem_bounds = (bbox_w, bbox_s, bbox_e, bbox_n)
+            if analysis_crs is None:
+                raise ValueError("py3dep DEM has no CRS")
+
+            analysis_shape = analysis_data.shape
+            display_shape = display_data.shape
+            ws_mask = _mask_geometry_to_raster(
+                ws_shape, "EPSG:4326", analysis_crs, analysis_transform, analysis_shape
+            )
+            display_mask = _mask_geometry_to_raster(
+                ws_shape, "EPSG:4326", "EPSG:4326", display_transform, display_shape
+            )
+
+            display_array = np.where(display_mask, display_data, np.nan)
+            dem_bounds = tuple(float(v) for v in dem_display.rio.bounds())
+            res_x, res_y = dem_analysis.rio.resolution()
+            res_mx, res_my = abs(float(res_x)), abs(float(res_y))
+
+            analysis_data[~np.isfinite(analysis_data)] = NODATA
+            _write_float_dem_raster(
+                tmp_dem,
+                analysis_data,
+                analysis_transform,
+                analysis_crs,
+                float(NODATA),
+            )
+        except Exception as exc:
+            py3dep_errors.append(f"py3dep failed: {type(exc).__name__}: {exc}")
+
+        if ws_mask is None or display_array is None or dem_bounds is None or res_mx is None or res_my is None:
+            centre_lat = (miny + maxy) / 2.0
+            m_per_deg_lon = 111_320.0 * np.cos(np.radians(centre_lat))
+            m_per_deg_lat = 111_320.0
+
+            dem_bytes, fallback_source = _download_dem_geotiff_bytes(
+                bbox_w=bbox_w,
+                bbox_s=bbox_s,
+                bbox_e=bbox_e,
+                bbox_n=bbox_n,
+                width=300,
+                height=300,
+            )
+            if dem_bytes is None:
+                errors = py3dep_errors + [fallback_source or "DEM download failed"]
+                return {
+                    "_error": "DEM features unavailable — " + " | ".join(errors),
+                    "_note": "DEM data not available in this environment. Slope and flow path analysis skipped.",
+                }, False
+
+            fd, tmp_raw = tempfile.mkstemp(suffix="_dem_raw.tif")
+            with _os.fdopen(fd, "wb") as fh:
+                fh.write(dem_bytes)
+
+            with rasterio.open(tmp_raw) as src:
+                raw_data = src.read(1).astype(np.float32)
+                if src.nodata is not None:
+                    raw_data[raw_data == src.nodata] = NODATA
+
+                dem_transform = src.transform
+                dem_shape = raw_data.shape
+                ws_mask = _mask_geometry_to_raster(
+                    ws_shape, "EPSG:4326", src.crs or "EPSG:4326", dem_transform, dem_shape
+                )
+                raw_display = raw_data.astype(float)
+                raw_display[raw_display == float(NODATA)] = np.nan
+                display_array = np.where(ws_mask, raw_display, np.nan)
+                dem_bounds = (bbox_w, bbox_s, bbox_e, bbox_n)
+                res_mx = abs(src.res[0]) * m_per_deg_lon
+                res_my = abs(src.res[1]) * m_per_deg_lat
+
+                _write_float_dem_raster(
+                    tmp_dem,
+                    raw_data,
+                    dem_transform,
+                    src.crs or "EPSG:4326",
+                    float(NODATA),
+                )
+
+            dem_source = fallback_source
+
+        metrics, _flow_err = _compute_dem_metrics(
+            tmp_dem,
+            ws_mask=ws_mask,
+            res_mx=res_mx,
+            res_my=res_my,
+            nodata=float(NODATA),
+        )
 
         result = {
-            "flow_length_ft": round(L_ft, 1) if L_ft is not None else None,
-            "mean_slope_pct": round(mean_slope, 2),
-            "elev_min_m":     round(elev_min_m, 1),
-            "elev_max_m":     round(elev_max_m, 1),
-            "dem_array":      elev_ws,
-            "dem_bounds":     dem_bounds,
-            "res_mx":         res_mx,
-            "res_my":         res_my,
-            "dem_source":     dem_source,
+            **metrics,
+            "dem_array": display_array,
+            "dem_bounds": dem_bounds,
+            "res_mx": res_mx,
+            "res_my": res_my,
+            "dem_source": dem_source,
         }
         if _flow_err:
             result["_flow_length_warning"] = _flow_err

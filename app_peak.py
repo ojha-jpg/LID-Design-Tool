@@ -938,15 +938,6 @@ def _generate_report_html() -> bytes:
     except Exception:
         pass
 
-    # ------------------------------------------------------------------ Figure 2: DEM map
-    dem_map_img = ""
-    if dem_feats and ws_geom is not None:
-        try:
-            _dem_f, _ = render_dem_static(dem_feats, ws_geom)
-            dem_map_img = fig_b64(_dem_f)
-        except Exception:
-            pass
-
     # ------------------------------------------------------------------ Figure 3: HSG spatial map
     hsg_map_img = ""
     soil_gdf_r  = ss.get("soil_gdf")
@@ -1196,7 +1187,6 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
   {metric_box("Design Storm Duration", f"{storm_dur} hr")}
 </div>
 {"<h3>DEM-derived Features (USGS 3DEP 1/3 arc-sec)</h3>" + dem_block if dem_feats else ""}
-{img_tag(dem_map_img, "Figure 2. DEM elevation — USGS 3DEP 1/3 arc-sec. Dashed line = watershed boundary.", "95%")}
 <div class="info">
   <strong>Time of Concentration (Tc)</strong> = {tc * 60:.1f} min drives both methods:
   the Rational Method uses Atlas&nbsp;14 intensity at duration&nbsp;=&nbsp;Tc,
@@ -1763,7 +1753,7 @@ def main() -> None:
 
             # --- DEM features summary ---
             dem_feats = st.session_state.get("dem_features")
-            if dem_feats:
+            if dem_feats and "_error" not in dem_feats:
                 st.markdown("---")
                 st.markdown("### DEM-derived Watershed Features")
                 dc1, dc2, dc3, dc4 = st.columns(4)
@@ -1775,6 +1765,11 @@ def main() -> None:
                 dc4.metric("Max Elevation", f"{dem_feats['elev_max_m']:.1f} m",
                            delta=f"Δ {dem_feats['elev_max_m'] - dem_feats['elev_min_m']:.1f} m relief",
                            delta_color="off")
+            elif dem_feats and "_error" in dem_feats:
+                st.markdown("---")
+                st.info(f"⚠️ DEM features unavailable: {dem_feats.get('_error', 'Unknown error')}")
+                if dem_feats.get("_note"):
+                    st.caption(dem_feats["_note"])
 
             # --- Soil + land use maps ---
             st.markdown("---")
@@ -1791,11 +1786,14 @@ def main() -> None:
             )
 
             # DEM elevation map
-            if dem_feats:
+            if dem_feats and "_error" not in dem_feats:
                 with st.expander("DEM Elevation", expanded=True):
                     st_folium(render_dem_map(dem_feats, ws_geom_map),
                               use_container_width=True, height=400,
                               key="map_s3_dem", returned_objects=[])
+            elif dem_feats and "_error" in dem_feats:
+                with st.expander("DEM Elevation", expanded=False):
+                    st.info(f"ℹ️ {dem_feats.get('_note', 'DEM data unavailable in this environment.')}")
 
             with st.expander("Hydrologic Soil Group", expanded=True):
                 if soil_gdf is not None and not soil_gdf.empty:
