@@ -753,10 +753,15 @@ def _fetch_nlcd_tile_wcs(geom):
     finally:
         os.unlink(tmp)
 
-    # Reproject watershed geometry to EPSG:5070 for the pixel mask
-    geom_5070 = shp_transform(t4326_5070.transform, geom)
+    # Reproject watershed geometry to EPSG:5070 for the pixel mask.
+    # rasterio.warp.transform_geom is more robust than shp_transform for
+    # geometries near the edge of EPSG:5070's valid domain — it avoids NaN
+    # vertices that would make geometry_mask crash with "cannot convert float
+    # NaN to integer".
+    from rasterio.warp import transform_geom as rio_transform_geom
+    geom_5070_json = rio_transform_geom("EPSG:4326", "EPSG:5070", mapping(geom))
     inside = geometry_mask(
-        [mapping(geom_5070)],
+        [geom_5070_json],
         out_shape=data.shape,
         transform=win_tf,
         invert=True,
@@ -776,8 +781,9 @@ def fetch_landuse_composition(watershed_geojson: dict) -> tuple[dict, bool]:
         geom = _extract_geometry(watershed_geojson)
         data, _, nodata, inside = _fetch_nlcd_tile_wcs(geom)
 
-        pixel_values = data[inside]
-        if nodata is not None:
+        pixel_values = np.asarray(data[inside], dtype=float)
+        pixel_values = pixel_values[np.isfinite(pixel_values)]
+        if nodata is not None and np.isfinite(nodata):
             pixel_values = pixel_values[pixel_values != nodata]
         pixel_values = pixel_values[pixel_values > 0]
 
@@ -790,6 +796,10 @@ def fetch_landuse_composition(watershed_geojson: dict) -> tuple[dict, bool]:
 def _nlcd_pixels_to_landuse(pixel_values: np.ndarray) -> dict:
     """Convert array of NLCD pixel values to landuse percentage dict."""
     totals: dict[str, int] = {}
+    pixel_values = np.asarray(pixel_values, dtype=float)
+    pixel_values = pixel_values[np.isfinite(pixel_values)]
+    pixel_values = pixel_values[pixel_values > 0]
+
     for pv in pixel_values:
         lu = NLCD_TO_LANDUSE.get(int(pv))
         if lu is not None:
@@ -842,31 +852,61 @@ def fetch_nlcd_array(watershed_geojson: dict):
     Fetch NLCD land cover from the MRLC WCS API and return the pixel array.
 
     Returns ((2D np.ndarray of uint16 NLCD codes, (west, south, east, north)), is_live: bool).
-    Pixels outside the watershed boundary are set to 0.
+    The returned array is reprojected to an EPSG:4326 grid for display, with
+    pixels outside the watershed boundary set to 0.
     Returns (None, False) on failure.
     """
     try:
         from rasterio.transform import array_bounds
+        from rasterio.features import geometry_mask
+        from rasterio.warp import calculate_default_transform, reproject, Resampling
 
         geom = _extract_geometry(watershed_geojson)
         data, win_tf, nodata, inside = _fetch_nlcd_tile_wcs(geom)
 
-        arr = np.where(inside, data, 0).astype(np.uint16)
+        arr_5070 = np.where(inside, data, 0).astype(np.uint16)
         if nodata is not None:
-            arr = np.where(data == nodata, 0, arr)
+            arr_5070 = np.where(data == nodata, 0, arr_5070)
 
-        south, west, north, east = array_bounds(arr.shape[0], arr.shape[1], win_tf)
-        t5070_4326 = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
-        west_south_x, west_south_y = t5070_4326.transform(west, south)
-        east_north_x, east_north_y = t5070_4326.transform(east, north)
-        bounds_wgs84 = (
-            float(min(west_south_x, east_north_x)),
-            float(min(west_south_y, east_north_y)),
-            float(max(west_south_x, east_north_x)),
-            float(max(west_south_y, east_north_y)),
+        src_h, src_w = arr_5070.shape
+        src_west, src_south, src_east, src_north = array_bounds(src_h, src_w, win_tf)
+        dst_tf, dst_w, dst_h = calculate_default_transform(
+            "EPSG:5070",
+            "EPSG:4326",
+            src_w,
+            src_h,
+            src_west,
+            src_south,
+            src_east,
+            src_north,
         )
 
-        return (arr, bounds_wgs84), True
+        arr_4326 = np.zeros((dst_h, dst_w), dtype=np.uint16)
+        reproject(
+            source=arr_5070,
+            destination=arr_4326,
+            src_transform=win_tf,
+            src_crs="EPSG:5070",
+            src_nodata=0,
+            dst_transform=dst_tf,
+            dst_crs="EPSG:4326",
+            dst_nodata=0,
+            resampling=Resampling.nearest,
+        )
+
+        inside_4326 = geometry_mask(
+            [mapping(geom)],
+            out_shape=arr_4326.shape,
+            transform=dst_tf,
+            invert=True,
+            all_touched=False,
+        )
+        arr_4326 = np.where(inside_4326, arr_4326, 0).astype(np.uint16)
+
+        west, south, east, north = array_bounds(arr_4326.shape[0], arr_4326.shape[1], dst_tf)
+        bounds_wgs84 = (float(west), float(south), float(east), float(north))
+
+        return (arr_4326, bounds_wgs84), True
 
     except Exception:
         return None, False
@@ -936,11 +976,13 @@ def fetch_landuse_soil_intersection(watershed_geojson: dict) -> tuple[dict, bool
         )
 
         # --- Step 4: tally (lu_key, hsg) pairs inside the watershed mask ---
-        nlcd_flat = nlcd_data[ws_mask]
+        nlcd_flat = np.asarray(nlcd_data[ws_mask], dtype=float)
         hsg_flat  = hsg_raster[ws_mask]
 
-        if nodata is not None:
-            valid     = nlcd_flat != nodata
+        valid = np.isfinite(nlcd_flat)
+        if nodata is not None and np.isfinite(nodata):
+            valid &= nlcd_flat != nodata
+        if valid.size:
             nlcd_flat = nlcd_flat[valid]
             hsg_flat  = hsg_flat[valid]
 
