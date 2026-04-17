@@ -1549,10 +1549,7 @@ def main() -> None:
                     try:
                         result = delineate_watershed(lat, lon)
                         st.session_state["watershed"]   = result
-                        basin_chars = get_basin_characteristics(
-                            result["workspace_id"],
-                            region=result.get("region", "OK"),
-                        )
+                        basin_chars = get_basin_characteristics(result["workspace_id"])
                         st.session_state["basin_chars"] = basin_chars
                     except Exception as e:
                         st.error(f"StreamStats delineation failed: {e}")
@@ -1686,8 +1683,8 @@ def main() -> None:
 
             if st.session_state.get("usgs_flows") is None:
                 _ws_id = watershed.get("workspace_id")
-                _region = watershed.get("region", "OK")
-                if _ws_id and _ws_id != "N/A":
+                _region = watershed.get("region")
+                if _ws_id and _ws_id != "N/A" and _region:
                     with st.spinner("Fetching regression flows..."):
                         st.session_state["usgs_flows"] = get_peak_flow_regression(_ws_id, region=_region)
                 else:

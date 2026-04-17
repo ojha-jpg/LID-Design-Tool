@@ -306,6 +306,18 @@ _SS_BASE = "https://streamstats.usgs.gov"
 _TIMEOUT = 60  # seconds
 _CENSUS_GEOCODER_URL = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 _CENSUS_GEOGRAPHIES_URL = "https://geocoding.geo.census.gov/geocoder/geographies/coordinates"
+_STATE_FIPS_TO_ABBREV = {
+    "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO",
+    "09": "CT", "10": "DE", "11": "DC", "12": "FL", "13": "GA", "15": "HI",
+    "16": "ID", "17": "IL", "18": "IN", "19": "IA", "20": "KS", "21": "KY",
+    "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
+    "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH",
+    "34": "NJ", "35": "NM", "36": "NY", "37": "NC", "38": "ND", "39": "OH",
+    "40": "OK", "41": "OR", "42": "PA", "44": "RI", "45": "SC", "46": "SD",
+    "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
+    "54": "WV", "55": "WI", "56": "WY", "60": "AS", "66": "GU", "69": "MP",
+    "72": "PR", "78": "VI",
+}
 
 
 def reverse_geocode_state(lat: float, lon: float) -> tuple[dict, bool]:
@@ -339,7 +351,9 @@ def reverse_geocode_state(lat: float, lon: float) -> tuple[dict, bool]:
 
         state = states[0]
         abbrev = str(state.get("STUSAB") or "").strip().upper()
-        name = str(state.get("BASENAME") or "").strip()
+        if not abbrev:
+            abbrev = _STATE_FIPS_TO_ABBREV.get(str(state.get("GEOID") or "").zfill(2), "")
+        name = str(state.get("BASENAME") or state.get("NAME") or "").strip()
         if not abbrev:
             return {}, False
 
@@ -427,7 +441,7 @@ def delineate_watershed(lat: float, lon: float, region: str | None = None) -> di
     }
 
 
-def get_basin_characteristics(workspace_id: str, region: str = "OK") -> dict:
+def get_basin_characteristics(workspace_id: str, region: str | None = None) -> dict:
     """
     Retrieve basin characteristics from USGS StreamStats.
 
@@ -465,7 +479,7 @@ def get_basin_characteristics(workspace_id: str, region: str = "OK") -> dict:
     return result
 
 
-def get_peak_flow_regression(workspace_id: str, region: str = "OK") -> list[dict]:
+def get_peak_flow_regression(workspace_id: str, region: str | None = None) -> list[dict]:
     """
     Get USGS regression-based peak flow estimates via NSS.
 
@@ -475,8 +489,10 @@ def get_peak_flow_regression(workspace_id: str, region: str = "OK") -> list[dict
     Returns empty list if workspace_id is invalid ('N/A') — the delineation endpoint
     does not produce a usable workspace for regression queries.
     """
-    if not workspace_id or workspace_id == "N/A":
+    if not workspace_id or workspace_id == "N/A" or not region:
         return []
+
+    region = str(region).upper()
 
     # First get regression regions for this workspace
     url_regions = f"{_SS_BASE}/ss-delineate/v1/regression-regions/{region}"

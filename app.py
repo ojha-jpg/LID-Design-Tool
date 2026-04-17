@@ -68,7 +68,7 @@ def homepage() -> None:
             "SSURGO soils, NLCD land use, CN + Rational method peak flows. "
             "Runs entirely from public APIs."
         )
-        st.markdown("*Oklahoma · USGS StreamStats + USGS 3DEP DEM*")
+        st.markdown("*U.S. points where StreamStats is available · USGS StreamStats + USGS 3DEP DEM*")
         if st.button("Open Peak Runoff Tool", use_container_width=True, type="primary"):
             st.switch_page(peak_page)
 
