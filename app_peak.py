@@ -116,6 +116,7 @@ def _init_state():
         "intersection_live": None,
         "soil_gdf": None,              # GeoDataFrame — clipped SSURGO with HSG + texture
         "nlcd_arr": None,              # np.ndarray — clipped NLCD pixel codes
+        "nlcd_bounds": None,           # (west, south, east, north) bounds for NLCD overlay
         "usgs_flows": None,       # list from get_peak_flow_regression()
         "tc_hr": 0.5,             # time of concentration (hours) — set from StreamStats TLAG or default 30 min
         "map1_center": USA_CENTER,
@@ -517,23 +518,18 @@ def render_nlcd_figure(nlcd_arr):
     return fig, [(c, f"{lbl} ({pct:.1f}%)") for c, lbl, pct in legend_items]
 
 
-def render_nlcd_map(nlcd_arr, ws_geom) -> folium.Map:
+def render_nlcd_map(nlcd_arr, nlcd_bounds, ws_geom) -> folium.Map:
     """
     Interactive Folium map of the NLCD land cover raster.
 
     The NLCD array is converted to an RGBA ImageOverlay using _NLCD_STYLE
-    colours.  Zero-valued pixels (outside the watershed) are transparent.
-    Bounds are derived from the watershed geometry + the same 0.01-degree
-    buffer that _fetch_nlcd_tile_wcs uses, so the image aligns correctly.
+    colours. Zero-valued pixels (outside the watershed) are transparent.
+    Bounds come from the fetched raster itself so the overlay aligns with the
+    actual tile extent rather than an approximate watershed bbox expansion.
     """
     import matplotlib.colors as mcolors
 
-    _BUF = 0.01   # must match api_clients._NLCD_BBOX_BUF
-    minx, miny, maxx, maxy = ws_geom.bounds
-    bbox_w = minx - _BUF
-    bbox_s = miny - _BUF
-    bbox_e = maxx + _BUF
-    bbox_n = maxy + _BUF
+    bbox_w, bbox_s, bbox_e, bbox_n = nlcd_bounds
 
     h, w = nlcd_arr.shape
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
@@ -735,7 +731,7 @@ def render_texture_static(soil_gdf, ws_geom):
     return fig, _render_legend_html(legend_items)
 
 
-def render_nlcd_static(nlcd_arr, ws_geom):
+def render_nlcd_static(nlcd_arr, nlcd_bounds, ws_geom):
     """Static matplotlib map of NLCD land cover with contextily basemap.
 
     Returns (fig, legend_html_str).
@@ -743,11 +739,10 @@ def render_nlcd_static(nlcd_arr, ws_geom):
     import matplotlib.colors as mcolors
     from pyproj import Transformer
 
-    _BUF = 0.01
-    minx, miny, maxx, maxy = ws_geom.bounds
     t4326_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-    x0, y0 = t4326_3857.transform(minx - _BUF, miny - _BUF)
-    x1, y1 = t4326_3857.transform(maxx + _BUF, maxy + _BUF)
+    bbox_w, bbox_s, bbox_e, bbox_n = nlcd_bounds
+    x0, y0 = t4326_3857.transform(bbox_w, bbox_s)
+    x1, y1 = t4326_3857.transform(bbox_e, bbox_n)
 
     h, w = nlcd_arr.shape
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
@@ -952,9 +947,10 @@ def _generate_report_html() -> bytes:
     # ------------------------------------------------------------------ Figure 4: NLCD spatial map
     nlcd_map_img = ""
     nlcd_arr_r   = ss.get("nlcd_arr")
-    if nlcd_arr_r is not None and ws_geom is not None:
+    nlcd_bounds_r = ss.get("nlcd_bounds")
+    if nlcd_arr_r is not None and nlcd_bounds_r is not None and ws_geom is not None:
         try:
-            _nlcd_f, _ = render_nlcd_static(nlcd_arr_r, ws_geom)
+            _nlcd_f, _ = render_nlcd_static(nlcd_arr_r, nlcd_bounds_r, ws_geom)
             nlcd_map_img = fig_b64(_nlcd_f)
         except Exception:
             pass
@@ -1678,8 +1674,13 @@ def main() -> None:
 
             if st.session_state.get("nlcd_arr") is None:
                 with st.spinner("Loading land cover data..."):
-                    nlcd_arr, _ = fetch_nlcd_array(watershed["geojson"])
+                    nlcd_payload, _ = fetch_nlcd_array(watershed["geojson"])
+                    if nlcd_payload is not None:
+                        nlcd_arr, nlcd_bounds = nlcd_payload
+                    else:
+                        nlcd_arr, nlcd_bounds = None, None
                     st.session_state["nlcd_arr"] = nlcd_arr
+                    st.session_state["nlcd_bounds"] = nlcd_bounds
 
             if st.session_state.get("usgs_flows") is None:
                 _ws_id = watershed.get("workspace_id")
@@ -1792,6 +1793,7 @@ def main() -> None:
 
             soil_gdf = st.session_state.get("soil_gdf")
             nlcd_arr = st.session_state.get("nlcd_arr")
+            nlcd_bounds = st.session_state.get("nlcd_bounds")
 
             from shapely.geometry import shape as _shape
             ws_geom_map = _shape(
@@ -1827,8 +1829,8 @@ def main() -> None:
                     st.info("Soil polygon data unavailable.")
 
             with st.expander("Land Cover", expanded=True):
-                if nlcd_arr is not None:
-                    st_folium(render_nlcd_map(nlcd_arr, ws_geom_map),
+                if nlcd_arr is not None and nlcd_bounds is not None:
+                    st_folium(render_nlcd_map(nlcd_arr, nlcd_bounds, ws_geom_map),
                               use_container_width=True, height=400,
                               key="map_s3_nlcd", returned_objects=[])
                 else:

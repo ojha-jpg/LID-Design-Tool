@@ -841,19 +841,32 @@ def fetch_nlcd_array(watershed_geojson: dict):
     """
     Fetch NLCD land cover from the MRLC WCS API and return the pixel array.
 
-    Returns (2D np.ndarray of uint16 NLCD codes, is_live: bool).
+    Returns ((2D np.ndarray of uint16 NLCD codes, (west, south, east, north)), is_live: bool).
     Pixels outside the watershed boundary are set to 0.
     Returns (None, False) on failure.
     """
     try:
+        from rasterio.transform import array_bounds
+
         geom = _extract_geometry(watershed_geojson)
-        data, _, nodata, inside = _fetch_nlcd_tile_wcs(geom)
+        data, win_tf, nodata, inside = _fetch_nlcd_tile_wcs(geom)
 
         arr = np.where(inside, data, 0).astype(np.uint16)
         if nodata is not None:
             arr = np.where(data == nodata, 0, arr)
 
-        return arr, True
+        south, west, north, east = array_bounds(arr.shape[0], arr.shape[1], win_tf)
+        t5070_4326 = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
+        west_south_x, west_south_y = t5070_4326.transform(west, south)
+        east_north_x, east_north_y = t5070_4326.transform(east, north)
+        bounds_wgs84 = (
+            float(min(west_south_x, east_north_x)),
+            float(min(west_south_y, east_north_y)),
+            float(max(west_south_x, east_north_x)),
+            float(max(west_south_y, east_north_y)),
+        )
+
+        return (arr, bounds_wgs84), True
 
     except Exception:
         return None, False
