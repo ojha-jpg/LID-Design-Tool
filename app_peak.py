@@ -135,6 +135,8 @@ def _init_state():
         "rational_df": None,      # pd.DataFrame — Rational method results per return period
         "dem_fetch_done": False,  # True once DEM fetch has been attempted (even if it failed)
         "error": None,
+        "nhd_streams_geojson": None,  # GeoJSON dict of NHD+ flowlines for current viewport
+        "map1_bounds": None,          # Last known map viewport bounds from st_folium
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1316,6 +1318,43 @@ def _step_badge(n: int, label: str):
 # Falls back to a plain function on older Streamlit versions.
 # ---------------------------------------------------------------------------
 
+def _fetch_nhd_streams(bbox: tuple) -> dict | None:
+    """Fetch NHDPlus V2 flowlines for bbox (west, south, east, north) in WGS84.
+
+    Returns a GeoJSON-compatible dict or None if no features found.
+    Raises RuntimeError on network/API failure.
+    """
+    try:
+        from pynhd import WaterData
+    except ImportError as exc:
+        raise RuntimeError("pynhd is not installed. Run: pip install pynhd") from exc
+
+    try:
+        wd = WaterData("nhdflowline_network")
+        gdf = wd.bybox(bbox)
+    except Exception as exc:
+        raise RuntimeError(f"NHD stream fetch failed: {exc}") from exc
+
+    if gdf is None or gdf.empty:
+        return None
+
+    keep = [c for c in ("gnis_name", "streamorde", "geometry") if c in gdf.columns]
+    gdf = gdf[keep].copy()
+
+    # NHDPlus sometimes carries Inf/NaN in geometry coordinates (elevation
+    # attributes bleed into the coordinate array).  Drop those rows so
+    # json.loads doesn't blow up on the non-standard Infinity literal.
+    gdf = gdf[gdf.geometry.notna() & gdf.geometry.is_valid]
+
+    raw = gdf.to_json()
+    # Belt-and-suspenders: replace any remaining Infinity/-Infinity literals
+    # that geopandas may have written into numeric property fields.
+    import re as _re
+    raw = _re.sub(r'\bInfinity\b', 'null', raw)
+    raw = _re.sub(r'\b-Infinity\b', 'null', raw)
+    return json.loads(raw)
+
+
 _fragment = getattr(st, "fragment", lambda f: f)
 
 
@@ -1344,6 +1383,30 @@ def _render_step1_map():
     m = folium.Map(location=_map_center, zoom_start=_map_zoom, tiles="OpenStreetMap")
     MousePosition().add_to(m)
 
+    # NHD+ stream overlay — drawn before st_folium so it appears on the same
+    # rerun that cached it; streams are styled by Strahler order width.
+    if st.session_state.get("nhd_streams_geojson"):
+        _nhd_geojson = st.session_state["nhd_streams_geojson"]
+        # Inspect first feature's properties so the tooltip only references
+        # fields that actually exist (gnis_name is absent on unnamed reaches).
+        _sample_props = ((_nhd_geojson.get("features") or [{}])[0]).get("properties") or {}
+        _tip_fields   = [f for f in ("gnis_name", "streamorde") if f in _sample_props]
+        _tip_aliases  = {"gnis_name": "Stream Name", "streamorde": "Order"}
+        folium.GeoJson(
+            _nhd_geojson,
+            name="NHD+ Streams",
+            style_function=lambda f: {
+                "color": "#1565C0",
+                "weight": max(1.0, min(5.0, (f["properties"].get("streamorde") or 1) * 0.8)),
+                "opacity": 0.75,
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=_tip_fields,
+                aliases=[_tip_aliases[f] for f in _tip_fields],
+                localize=True,
+            ) if _tip_fields else None,
+        ).add_to(m)
+
     # Marker drawn into the map BEFORE st_folium renders it, so it's
     # visible on the same rerun that set the selected point.
     if st.session_state["selected_lat"] is not None:
@@ -1362,17 +1425,55 @@ def _render_step1_map():
     # ---- Render ----------------------------------------------------------
     map_data = st_folium(m, use_container_width=True, height=520, key="map_step1")
 
-    # ---- Capture click → store → rerun so marker appears immediately -----
-    if map_data and map_data.get("last_clicked"):
-        # Snapshot viewport before rerun so the map rebuilds at same zoom
+    # Always snapshot viewport bounds/zoom/center so the NHD button can use them
+    if map_data:
+        if map_data.get("bounds"):
+            st.session_state["map1_bounds"] = map_data["bounds"]
+        if map_data.get("zoom"):
+            st.session_state["map1_zoom"] = map_data["zoom"]
         if map_data.get("center"):
             c = map_data["center"]
             st.session_state["map1_center"] = [c["lat"], c["lng"]]
-        if map_data.get("zoom"):
-            st.session_state["map1_zoom"] = map_data["zoom"]
+
+    # ---- Capture click → store → rerun so marker appears immediately -----
+    if map_data and map_data.get("last_clicked"):
         st.session_state["selected_lat"] = map_data["last_clicked"]["lat"]
         st.session_state["selected_lon"] = map_data["last_clicked"]["lng"]
         st.rerun()
+
+    # ---- NHD+ stream overlay controls ------------------------------------
+    current_zoom = st.session_state.get("map1_zoom") or DEFAULT_ZOOM
+    streams_loaded = bool(st.session_state.get("nhd_streams_geojson"))
+
+    if current_zoom >= 10:
+        nhd_c1, nhd_c2 = st.columns([3, 1])
+        with nhd_c1:
+            btn_label = "Refresh NHD+ Streams" if streams_loaded else "Show NHD+ Streams"
+            if st.button(btn_label, key="load_nhd_streams", use_container_width=True):
+                bounds = st.session_state.get("map1_bounds")
+                if bounds:
+                    bbox = (
+                        bounds["_southWest"]["lng"],
+                        bounds["_southWest"]["lat"],
+                        bounds["_northEast"]["lng"],
+                        bounds["_northEast"]["lat"],
+                    )
+                    with st.spinner("Fetching NHD+ stream network..."):
+                        try:
+                            geojson = _fetch_nhd_streams(bbox)
+                            st.session_state["nhd_streams_geojson"] = geojson
+                            if geojson is None:
+                                st.warning("No NHD+ streams found in the current viewport.")
+                        except RuntimeError as exc:
+                            st.error(str(exc))
+                    st.rerun()
+        with nhd_c2:
+            if streams_loaded:
+                if st.button("Clear Streams", key="clear_nhd_streams", use_container_width=True):
+                    st.session_state["nhd_streams_geojson"] = None
+                    st.rerun()
+    else:
+        st.caption(f"Zoom in to level 10+ to enable NHD+ stream overlay (current: {current_zoom})")
 
     # ---- Controls shown only after a point is selected -------------------
     if st.session_state["selected_lat"] is not None:
