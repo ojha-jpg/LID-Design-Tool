@@ -598,7 +598,7 @@ def main() -> None:
 
     st.markdown("")
     c1, c2, c3 = st.columns([1, 1, 2])
-    delta_color = "normal" if vol_total <= tank_gal else "inverse"
+    delta_color = "inverse" if vol_total <= tank_gal else "normal"
     c1.metric(
         "Total Volume Required (Voltotal)",
         f"{vol_total:.1f} gal",
