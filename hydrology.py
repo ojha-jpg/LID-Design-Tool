@@ -246,6 +246,81 @@ def build_storm_table(
     return rows
 
 
+def _runoff_rate_to_cfs(runoff_depth_in: float, dt_hr: float, area_sqmi: float) -> float:
+    """Convert runoff depth over a timestep to an equivalent discharge in cfs."""
+    if runoff_depth_in <= 0.0 or dt_hr <= 0.0 or area_sqmi <= 0.0:
+        return 0.0
+    cfs_per_inhr_ac = 43560.0 / 12.0 / 3600.0
+    runoff_rate_inhr = runoff_depth_in / dt_hr
+    return runoff_rate_inhr * sqmi_to_acres(area_sqmi) * cfs_per_inhr_ac
+
+
+def scs_interval_peak_flow(
+    CN: float,
+    P_D: float,
+    A_sqmi: float,
+    duration_hr: float,
+    dt: float = 0.25,
+) -> float:
+    """
+    Peak discharge (cfs) from the maximum incremental effective runoff interval.
+
+    The design storm is distributed with the SCS Type II mass curve. Incremental
+    effective runoff is computed with the CN method, then the largest timestep
+    runoff depth is converted to an equivalent discharge over that timestep.
+    """
+    tbl = build_storm_table(P_D, duration_hr, CN, dt)
+    peak_runoff_in = max((row["Incremental Effective Runoff (in)"] for row in tbl), default=0.0)
+    return round(_runoff_rate_to_cfs(peak_runoff_in, dt, A_sqmi), 1)
+
+
+def scs_interval_analysis(
+    CN: float,
+    P_D: float,
+    A_sqmi: float,
+    duration_hr: float,
+    dt: float = 0.25,
+) -> dict:
+    """
+    Return the timestep runoff profile used by the interval-based CN method.
+
+    Returns a dict with keys:
+      "storm_table"      — list[dict] from build_storm_table()
+      "runoff_times"     — list[float] interval midpoint times from storm start (hr)
+      "runoff_flow"      — list[float] equivalent interval discharge values (cfs)
+      "peak_flow"        — float, max(runoff_flow) in cfs
+      "peak_time"        — float, time at peak_flow (hr, interval midpoint)
+      "peak_runoff_in"   — float, max incremental effective runoff depth (in)
+      "peak_runoff_rate" — float, max incremental effective runoff rate (in/hr)
+      "dt"               — float timestep (hr)
+    """
+    tbl = build_storm_table(P_D, duration_hr, CN, dt)
+    t_start = tbl[0]["Time (hr)"] if tbl else 0.0
+    runoff_flow = [
+        round(_runoff_rate_to_cfs(row["Incremental Effective Runoff (in)"], dt, A_sqmi), 2)
+        for row in tbl
+    ]
+    runoff_times = [
+        round((row["Time (hr)"] - t_start) if idx == 0 else (row["Time (hr)"] - t_start - dt / 2.0), 4)
+        for idx, row in enumerate(tbl)
+    ]
+
+    peak_flow = max(runoff_flow) if runoff_flow else 0.0
+    peak_idx = runoff_flow.index(peak_flow) if peak_flow > 0 else 0
+    peak_runoff_in = max((row["Incremental Effective Runoff (in)"] for row in tbl), default=0.0)
+
+    return {
+        "storm_table": tbl,
+        "runoff_times": runoff_times,
+        "runoff_flow": runoff_flow,
+        "peak_flow": round(peak_flow, 1),
+        "peak_time": round(runoff_times[peak_idx], 3) if runoff_times else 0.0,
+        "peak_runoff_in": round(peak_runoff_in, 3),
+        "peak_runoff_rate": round(peak_runoff_in / dt, 3) if dt > 0 else 0.0,
+        "dt": dt,
+    }
+
+
 def cn_peak_flow(
     CN: float,
     P_D: float,

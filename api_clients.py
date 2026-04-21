@@ -754,14 +754,43 @@ def _fetch_nlcd_tile_wcs(geom):
         os.unlink(tmp)
 
     # Reproject watershed geometry to EPSG:5070 for the pixel mask.
-    # rasterio.warp.transform_geom is more robust than shp_transform for
-    # geometries near the edge of EPSG:5070's valid domain — it avoids NaN
-    # vertices that would make geometry_mask crash with "cannot convert float
-    # NaN to integer".
+    # NaN vertices in the GeoJSON fed to geometry_mask cause a hard crash
+    # ("cannot convert float NaN to integer").  They can appear in two places:
+    #   1. Source geometry — corrupt/incomplete coordinates from StreamStats.
+    #   2. Post-transform — projection domain issues (e.g. non-CONUS regions).
+    # Strip NaN/inf vertices at both stages before calling geometry_mask.
+    import math
     from rasterio.warp import transform_geom as rio_transform_geom
-    geom_5070_json = rio_transform_geom("EPSG:4326", "EPSG:5070", mapping(geom))
+
+    def _clean_geojson(gj):
+        """Remove vertices containing NaN/inf and ensure rings stay closed."""
+        def ok(pt):
+            return all(math.isfinite(v) for v in pt)
+        def close(ring):
+            return ring if (not ring or ring[0] == ring[-1]) else ring + [ring[0]]
+        gtype = gj.get("type", "")
+        if gtype == "Polygon":
+            rings = [close([p for p in r if ok(p)]) for r in gj["coordinates"]]
+            rings = [r for r in rings if len(r) >= 4]
+            return {**gj, "coordinates": rings} if rings else None
+        if gtype == "MultiPolygon":
+            polys = [[close([p for p in r if ok(p)]) for r in poly]
+                     for poly in gj["coordinates"]]
+            polys = [[r for r in poly if len(r) >= 4] for poly in polys]
+            polys = [poly for poly in polys if poly]
+            return {**gj, "coordinates": polys} if polys else None
+        return gj
+
+    geom_src = _clean_geojson(mapping(geom)) or mapping(geom)
+    geom_5070_json = rio_transform_geom("EPSG:4326", "EPSG:5070", geom_src)
+    geom_5070_clean = _clean_geojson(geom_5070_json)
+    if geom_5070_clean is None:
+        raise RuntimeError(
+            "Watershed geometry collapsed after reprojection — "
+            "NLCD land cover is only available for the contiguous United States."
+        )
     inside = geometry_mask(
-        [geom_5070_json],
+        [geom_5070_clean],
         out_shape=data.shape,
         transform=win_tf,
         invert=True,

@@ -58,9 +58,8 @@ from hydrology import (
     composite_cn,
     composite_cn_from_intersection,
     composite_c,
-    cn_peak_flow,
-    scs_uh_peak_flow,
-    scs_uh_hydrograph,
+    scs_interval_peak_flow,
+    scs_interval_analysis,
     build_storm_table,
     rational_peak_flow,
     sqmi_to_acres,
@@ -135,8 +134,6 @@ def _init_state():
         "rational_df": None,      # pd.DataFrame — Rational method results per return period
         "dem_fetch_done": False,  # True once DEM fetch has been attempted (even if it failed)
         "error": None,
-        "nhd_streams_geojson": None,  # GeoJSON dict of NHD+ flowlines for current viewport
-        "map1_bounds": None,          # Last known map viewport bounds from st_folium
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1158,7 +1155,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 <p class="subtitle">
   Generated: {today} &nbsp;|&nbsp;
   Pour Point: {coord_str} &nbsp;|&nbsp;
-  Tool: LID Peak Runoff Tool (NRCS TR-55 + Rational Method)
+  Tool: LID Peak Runoff Tool (SCS CN interval method + Rational Method)
 </p>
 
 <!-- ===== 1. WATERSHED OVERVIEW ===== -->
@@ -1187,9 +1184,9 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 </div>
 {"<h3>DEM-derived Features (USGS 3DEP 1/3 arc-sec)</h3>" + dem_block if dem_feats else ""}
 <div class="info">
-  <strong>Time of Concentration (Tc)</strong> = {tc * 60:.1f} min drives both methods:
-  the Rational Method uses Atlas&nbsp;14 intensity at duration&nbsp;=&nbsp;Tc,
-  and the CN method routes incremental runoff through the SCS unit hydrograph (tp&nbsp;=&nbsp;dt/2&nbsp;+&nbsp;0.6·Tc).
+  <strong>Time of Concentration (Tc)</strong> = {tc * 60:.1f} min drives the Rational Method only:
+  Atlas&nbsp;14 intensity is evaluated at duration&nbsp;=&nbsp;Tc.
+  The CN method below uses the maximum incremental effective runoff interval from the SCS Type&nbsp;II storm table and converts that interval depth to an equivalent discharge for this small catchment.
 </div>
 
 <!-- ===== 3. SOIL COMPOSITION ===== -->
@@ -1234,15 +1231,15 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 {atlas_html if atlas_html else "<p>Not available.</p>"}
 
 <!-- ===== 7. CN METHOD ===== -->
-<h2>7. CN Method Peak Discharge (NRCS TR-55)</h2>
+<h2>7. SCS CN Method Peak Discharge</h2>
 <div class="info">
-  <strong>Formula:</strong> q<sub>p</sub> = peak of [incremental runoff × SCS unit hydrograph convolution]<br>
-  SCS dimensionless UH: tp = dt/2 + 0.6·Tc = {(0.25/2 + 0.6*tc):.2f} hr, qp = 484·A/tp.<br>
-  Incremental runoff from the central {storm_dur}-hr window of the SCS Type&nbsp;II mass curve, scaled to Atlas&nbsp;14 depth.<br>
+  <strong>Formula:</strong> q<sub>p</sub> = max[incremental effective runoff depth / &Delta;t] &times; A<br>
+  Incremental runoff comes from the central {storm_dur}-hr window of the SCS Type&nbsp;II mass curve, scaled to Atlas&nbsp;14 depth.<br>
+  The peak interval discharge is computed as the largest incremental runoff depth over &Delta;t = 0.25 hr, converted from in/hr over the watershed area.<br>
   A = {area_sqmi:.3f}&nbsp;mi² — watershed area.
 </div>
 {cn_table_html if cn_table_html else "<p>Results not available — complete Step 4 first.</p>"}
-{img_tag(cn_img, f"Figure 7. CN method peak discharge by return period ({storm_dur}-hr design storm, SCS UH convolution).", "80%")}
+{img_tag(cn_img, f"Figure 7. CN method peak discharge by return period ({storm_dur}-hr design storm, peak runoff interval conversion).", "80%")}
 
 <!-- ===== 8. RATIONAL METHOD ===== -->
 <h2>8. Rational Method Peak Discharge</h2>
@@ -1267,7 +1264,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
   <li>Watershed delineated via USGS StreamStats using the regional stream network and elevation products available for the selected state/territory.</li>
   <li>Soil hydrologic group from SSURGO (gSSURGO, USDA-NRCS). Land use from NLCD 2024.</li>
   <li>Precipitation from NOAA Atlas 14 point precipitation frequency estimates. 90% confidence bounds not shown.</li>
-  <li>CN method routes incremental SCS Type II runoff through the SCS dimensionless unit hydrograph (NEH-4 Table 16-2).</li>
+  <li>CN peak discharge is approximated from the maximum incremental effective runoff depth in the SCS Type II storm table, converted to an equivalent discharge over the analysis interval (&Delta;t = 0.25 hr).</li>
   <li>Rational Method (Q = CIA) is most reliable for small, highly impervious watersheds (&lt; 640 ac).</li>
   <li>AMC II (average antecedent moisture conditions) assumed throughout.</li>
   <li>Results represent peak discharge only. Channel routing and downstream attenuation are not modeled.</li>
@@ -1276,7 +1273,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 
 <div class="footer">
   LID Peak Runoff Tool &nbsp;&bull;&nbsp; Generated {today} &nbsp;&bull;&nbsp;
-  NRCS TR-55 + Rational Method &nbsp;&bull;&nbsp; NOAA Atlas 14
+  SCS CN interval method + Rational Method &nbsp;&bull;&nbsp; NOAA Atlas 14
 </div>
 </body>
 </html>"""
@@ -1318,43 +1315,6 @@ def _step_badge(n: int, label: str):
 # Falls back to a plain function on older Streamlit versions.
 # ---------------------------------------------------------------------------
 
-def _fetch_nhd_streams(bbox: tuple) -> dict | None:
-    """Fetch NHDPlus V2 flowlines for bbox (west, south, east, north) in WGS84.
-
-    Returns a GeoJSON-compatible dict or None if no features found.
-    Raises RuntimeError on network/API failure.
-    """
-    try:
-        from pynhd import WaterData
-    except ImportError as exc:
-        raise RuntimeError("pynhd is not installed. Run: pip install pynhd") from exc
-
-    try:
-        wd = WaterData("nhdflowline_network")
-        gdf = wd.bybox(bbox)
-    except Exception as exc:
-        raise RuntimeError(f"NHD stream fetch failed: {exc}") from exc
-
-    if gdf is None or gdf.empty:
-        return None
-
-    keep = [c for c in ("gnis_name", "streamorde", "geometry") if c in gdf.columns]
-    gdf = gdf[keep].copy()
-
-    # NHDPlus sometimes carries Inf/NaN in geometry coordinates (elevation
-    # attributes bleed into the coordinate array).  Drop those rows so
-    # json.loads doesn't blow up on the non-standard Infinity literal.
-    gdf = gdf[gdf.geometry.notna() & gdf.geometry.is_valid]
-
-    raw = gdf.to_json()
-    # Belt-and-suspenders: replace any remaining Infinity/-Infinity literals
-    # that geopandas may have written into numeric property fields.
-    import re as _re
-    raw = _re.sub(r'\bInfinity\b', 'null', raw)
-    raw = _re.sub(r'\b-Infinity\b', 'null', raw)
-    return json.loads(raw)
-
-
 _fragment = getattr(st, "fragment", lambda f: f)
 
 
@@ -1383,30 +1343,6 @@ def _render_step1_map():
     m = folium.Map(location=_map_center, zoom_start=_map_zoom, tiles="OpenStreetMap")
     MousePosition().add_to(m)
 
-    # NHD+ stream overlay — drawn before st_folium so it appears on the same
-    # rerun that cached it; streams are styled by Strahler order width.
-    if st.session_state.get("nhd_streams_geojson"):
-        _nhd_geojson = st.session_state["nhd_streams_geojson"]
-        # Inspect first feature's properties so the tooltip only references
-        # fields that actually exist (gnis_name is absent on unnamed reaches).
-        _sample_props = ((_nhd_geojson.get("features") or [{}])[0]).get("properties") or {}
-        _tip_fields   = [f for f in ("gnis_name", "streamorde") if f in _sample_props]
-        _tip_aliases  = {"gnis_name": "Stream Name", "streamorde": "Order"}
-        folium.GeoJson(
-            _nhd_geojson,
-            name="NHD+ Streams",
-            style_function=lambda f: {
-                "color": "#1565C0",
-                "weight": max(1.0, min(5.0, (f["properties"].get("streamorde") or 1) * 0.8)),
-                "opacity": 0.75,
-            },
-            tooltip=folium.GeoJsonTooltip(
-                fields=_tip_fields,
-                aliases=[_tip_aliases[f] for f in _tip_fields],
-                localize=True,
-            ) if _tip_fields else None,
-        ).add_to(m)
-
     # Marker drawn into the map BEFORE st_folium renders it, so it's
     # visible on the same rerun that set the selected point.
     if st.session_state["selected_lat"] is not None:
@@ -1425,55 +1361,17 @@ def _render_step1_map():
     # ---- Render ----------------------------------------------------------
     map_data = st_folium(m, use_container_width=True, height=520, key="map_step1")
 
-    # Always snapshot viewport bounds/zoom/center so the NHD button can use them
-    if map_data:
-        if map_data.get("bounds"):
-            st.session_state["map1_bounds"] = map_data["bounds"]
-        if map_data.get("zoom"):
-            st.session_state["map1_zoom"] = map_data["zoom"]
+    # ---- Capture click → store → rerun so marker appears immediately -----
+    if map_data and map_data.get("last_clicked"):
+        # Snapshot viewport before rerun so the map rebuilds at same zoom
         if map_data.get("center"):
             c = map_data["center"]
             st.session_state["map1_center"] = [c["lat"], c["lng"]]
-
-    # ---- Capture click → store → rerun so marker appears immediately -----
-    if map_data and map_data.get("last_clicked"):
+        if map_data.get("zoom"):
+            st.session_state["map1_zoom"] = map_data["zoom"]
         st.session_state["selected_lat"] = map_data["last_clicked"]["lat"]
         st.session_state["selected_lon"] = map_data["last_clicked"]["lng"]
         st.rerun()
-
-    # ---- NHD+ stream overlay controls ------------------------------------
-    current_zoom = st.session_state.get("map1_zoom") or DEFAULT_ZOOM
-    streams_loaded = bool(st.session_state.get("nhd_streams_geojson"))
-
-    if current_zoom >= 10:
-        nhd_c1, nhd_c2 = st.columns([3, 1])
-        with nhd_c1:
-            btn_label = "Refresh NHD+ Streams" if streams_loaded else "Show NHD+ Streams"
-            if st.button(btn_label, key="load_nhd_streams", use_container_width=True):
-                bounds = st.session_state.get("map1_bounds")
-                if bounds:
-                    bbox = (
-                        bounds["_southWest"]["lng"],
-                        bounds["_southWest"]["lat"],
-                        bounds["_northEast"]["lng"],
-                        bounds["_northEast"]["lat"],
-                    )
-                    with st.spinner("Fetching NHD+ stream network..."):
-                        try:
-                            geojson = _fetch_nhd_streams(bbox)
-                            st.session_state["nhd_streams_geojson"] = geojson
-                            if geojson is None:
-                                st.warning("No NHD+ streams found in the current viewport.")
-                        except RuntimeError as exc:
-                            st.error(str(exc))
-                    st.rerun()
-        with nhd_c2:
-            if streams_loaded:
-                if st.button("Clear Streams", key="clear_nhd_streams", use_container_width=True):
-                    st.session_state["nhd_streams_geojson"] = None
-                    st.rerun()
-    else:
-        st.caption(f"Zoom in to level 10+ to enable NHD+ stream overlay (current: {current_zoom})")
 
     # ---- Controls shown only after a point is selected -------------------
     if st.session_state["selected_lat"] is not None:
@@ -2011,7 +1909,7 @@ def main() -> None:
             else:
                 tc = _tc_options[_tc_label]
             st.session_state["tc_hr"] = tc
-            st.caption(f"**Tc = {tc * 60:.1f} min**  used for peak-flow calculations below.")
+            st.caption(f"**Tc = {tc * 60:.1f} min**  used for the Rational Method intensity lookup below.")
 
             # Storm duration selector — CN method
             storm_duration_hr = st.number_input(
@@ -2022,7 +1920,8 @@ def main() -> None:
                 step=0.5,
                 help=(
                     "Duration of the design storm in hours. Atlas 14 depth is interpolated "
-                    "for this exact duration. Standard SCS TR-55 uses 24 hr."
+                    "for this exact duration. The SCS Type II storm pattern is normalized "
+                    "over this selected duration; traditional TR-55 workflows typically use 24 hr."
                 ),
                 key="storm_duration_input",
             )
@@ -2050,7 +1949,7 @@ def main() -> None:
                 depth_D      = atlas14.depth(storm_duration_hr, rp)
                 intensity_tc = atlas14.intensity(tc, rp)
 
-                q_cn       = scs_uh_peak_flow(CN, depth_D, area_sqmi, tc, storm_duration_hr)
+                q_cn       = scs_interval_peak_flow(CN, depth_D, area_sqmi, storm_duration_hr)
                 q_rational = rational_peak_flow(C, intensity_tc, area_acres)
 
                 # Runoff depth from the SCS storm table (last row)
@@ -2087,15 +1986,15 @@ def main() -> None:
 
             st.success("Calculations complete.")
 
-            st.markdown("**CN Method — Peak Discharge by Return Period**")
+            st.markdown("**SCS CN Method — Peak Discharge by Return Period**")
             st.dataframe(cn_df, hide_index=True, use_container_width=True)
 
-            with st.expander("SCS Storm Analysis", expanded=False):
+            with st.expander("SCS Interval Runoff Analysis", expanded=False):
                 _rp_sel = st.selectbox("Return Period", RETURN_PERIODS, key="storm_analysis_rp")
                 _P_D_sa = atlas14.depth(storm_duration_hr, _rp_sel)
-                _sa     = scs_uh_hydrograph(CN, _P_D_sa, area_sqmi, tc, storm_duration_hr)
+                _sa     = scs_interval_analysis(CN, _P_D_sa, area_sqmi, storm_duration_hr)
 
-                tab_tbl, tab_hyd = st.tabs(["Storm Table", "Hydrograph"])
+                tab_tbl, tab_hyd, tab_depth = st.tabs(["Storm Table", "Runoff Profile", "Depth Analysis"])
 
                 with tab_tbl:
                     st.caption(
@@ -2111,8 +2010,8 @@ def main() -> None:
                     _fig_hyd = go.Figure()
                     _fig_hyd.add_trace(
                         go.Scatter(
-                            x=_sa["drh_times"], y=_sa["drh_flow"],
-                            name="Direct Runoff (cfs)",
+                            x=_sa["runoff_times"], y=_sa["runoff_flow"],
+                            name="Equivalent Runoff Discharge (cfs)",
                             line=dict(color="#1f77b4", width=2),
                         )
                     )
@@ -2125,14 +2024,71 @@ def main() -> None:
                     _fig_hyd.update_layout(
                         height=320,
                         xaxis_title="Time from Storm Start (hr)",
-                        yaxis_title="Direct Runoff (cfs)",
+                        yaxis_title="Equivalent Runoff Discharge (cfs)",
                         margin=dict(l=50, r=60, t=50, b=40),
                         showlegend=False,
                     )
                     st.plotly_chart(_fig_hyd, use_container_width=True)
                     st.caption(
-                        f"tp = {_sa['tp']:.2f} hr  ·  "
+                        f"Peak interval runoff = {_sa['peak_runoff_in']:.2f} in over {_sa['dt']:.2f} hr  ·  "
                         f"Peak = {_sa['peak_flow']:.0f} cfs @ {_sa['peak_time']:.2f} hr from storm start"
+                    )
+
+                with tab_depth:
+                    _storm_df = pd.DataFrame(_sa["storm_table"]).copy()
+                    _t0 = _storm_df["Time (hr)"].iloc[0] if not _storm_df.empty else 0.0
+                    _storm_df["Time from Storm Start (hr)"] = _storm_df["Time (hr)"] - _t0
+
+                    _fig_depth = psp.make_subplots(specs=[[{"secondary_y": True}]])
+                    _fig_depth.add_trace(
+                        go.Bar(
+                            x=_storm_df["Time from Storm Start (hr)"],
+                            y=_storm_df["Incremental Depth (in)"],
+                            name="Incremental Rainfall (in)",
+                            marker_color="rgba(33, 150, 243, 0.45)",
+                        ),
+                        secondary_y=False,
+                    )
+                    _fig_depth.add_trace(
+                        go.Bar(
+                            x=_storm_df["Time from Storm Start (hr)"],
+                            y=_storm_df["Incremental Effective Runoff (in)"],
+                            name="Incremental Runoff (in)",
+                            marker_color="rgba(13, 43, 110, 0.65)",
+                        ),
+                        secondary_y=False,
+                    )
+                    _fig_depth.add_trace(
+                        go.Scatter(
+                            x=_storm_df["Time from Storm Start (hr)"],
+                            y=_storm_df["Depth (in)"],
+                            name="Cumulative Rainfall (in)",
+                            line=dict(color="#1e88e5", width=2),
+                        ),
+                        secondary_y=True,
+                    )
+                    _fig_depth.add_trace(
+                        go.Scatter(
+                            x=_storm_df["Time from Storm Start (hr)"],
+                            y=_storm_df["Accumulated Effective Runoff (in)"],
+                            name="Cumulative Runoff (in)",
+                            line=dict(color="#0d2b6e", width=3),
+                        ),
+                        secondary_y=True,
+                    )
+                    _fig_depth.update_layout(
+                        barmode="group",
+                        height=360,
+                        xaxis_title="Time from Storm Start (hr)",
+                        margin=dict(l=50, r=60, t=50, b=40),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                    )
+                    _fig_depth.update_yaxes(title_text="Incremental Depth (in)", secondary_y=False)
+                    _fig_depth.update_yaxes(title_text="Cumulative Depth (in)", secondary_y=True)
+                    st.plotly_chart(_fig_depth, use_container_width=True)
+                    st.caption(
+                        "Bars show incremental rainfall and effective runoff by analysis interval; "
+                        "lines show cumulative rainfall and cumulative effective runoff through the storm."
                     )
 
             st.markdown("**Rational Method — Peak Discharge by Return Period**")
