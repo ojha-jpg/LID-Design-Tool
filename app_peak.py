@@ -1248,7 +1248,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
   C = {C:.3f} — composite runoff coefficient (area-weighted from NLCD land use).<br>
   I (in/hr) — Atlas&nbsp;14 rainfall intensity at duration = Tc&nbsp;=&nbsp;{tc * 60:.0f}&nbsp;min.<br>
   A = {area_acres:.1f}&nbsp;ac — watershed area.
-  <br><em>Note: Rational Method is most reliable for watersheds &lt; 640 ac (1 mi²).</em>
+  <br><em>Note: Rational Method is most reliable for watersheds &lt;  200 ac.</em>
 </div>
 {rat_table_html if rat_table_html else "<p>Results not available — complete Step 4 first.</p>"}
 {img_tag(rat_img, f"Figure 8. Rational method peak discharge by return period (intensity at Tc = {tc * 60:.0f} min).", "80%")}
@@ -1258,18 +1258,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 {combined_table_html if combined_table_html else "<p>Results not available.</p>"}
 {img_tag(combined_img, "Figure 9. Side-by-side peak discharge comparison across all methods.", "95%")}
 
-<!-- ===== 10. ASSUMPTIONS & LIMITATIONS ===== -->
-<h2>10. Assumptions and Limitations</h2>
-<ul>
-  <li>Watershed delineated via USGS StreamStats using the regional stream network and elevation products available for the selected state/territory.</li>
-  <li>Soil hydrologic group from SSURGO (gSSURGO, USDA-NRCS). Land use from NLCD 2024.</li>
-  <li>Precipitation from NOAA Atlas 14 point precipitation frequency estimates. 90% confidence bounds not shown.</li>
-  <li>CN peak discharge is approximated from the maximum incremental effective runoff depth in the SCS Type II storm table, converted to an equivalent discharge over the analysis interval (&Delta;t = 0.25 hr).</li>
-  <li>Rational Method (Q = CIA) is most reliable for small, highly impervious watersheds (&lt; 640 ac).</li>
-  <li>AMC II (average antecedent moisture conditions) assumed throughout.</li>
-  <li>Results represent peak discharge only. Channel routing and downstream attenuation are not modeled.</li>
-  <li>Basemap tiles: CartoDB Positron via contextily (requires internet connection at report generation time).</li>
-</ul>
+
 
 <div class="footer">
   LID Peak Runoff Tool &nbsp;&bull;&nbsp; Generated {today} &nbsp;&bull;&nbsp;

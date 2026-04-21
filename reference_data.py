@@ -1,7 +1,9 @@
 """
 reference_data.py — Single source of truth for LID Peak Runoff Tool.
 
-All CN and C values reconciled against NRCS TR-55 Table 2-2.
+CN values are aligned to NRCS TR-55 Table 2-2 categories.
+Rational Method C values are representative screening defaults and should be
+checked against the governing local drainage manual for final design use.
 qu table from SCS Exhibit 4-II (Type II rainfall distribution, applicable to Oklahoma).
 """
 
@@ -17,20 +19,22 @@ SOIL_TYPES = {
 }
 
 # ---------------------------------------------------------------------------
-# Land use types — 14 categories
+# Land use types — 16 categories
 # Each entry: c_coeff (Rational Method), cn_a/b/c/d (NRCS TR-55 Table 2-2)
-# some website online
+# Developed-residential categories follow the TR-55 average imperviousness bins.
 # ---------------------------------------------------------------------------
 
 LANDUSE_TYPES = {
     "Row Crops":                {"c_coeff": 0.60, "cn_a": 72, "cn_b": 81, "cn_c": 88, "cn_d": 91},
     "Small Grain":              {"c_coeff": 0.45, "cn_a": 65, "cn_b": 76, "cn_c": 84, "cn_d": 88},
     "Close-seeded Legumes":     {"c_coeff": 0.40, "cn_a": 66, "cn_b": 77, "cn_c": 85, "cn_d": 89},
+    "Fallow/Bare Soil":         {"c_coeff": 0.50, "cn_a": 77, "cn_b": 86, "cn_c": 91, "cn_d": 94},
     "Pasture/Meadow":           {"c_coeff": 0.35, "cn_a": 49, "cn_b": 69, "cn_c": 79, "cn_d": 84},
     "Brush":                    {"c_coeff": 0.35, "cn_a": 35, "cn_b": 56, "cn_c": 70, "cn_d": 77},
     "Woods (Light)":            {"c_coeff": 0.25, "cn_a": 36, "cn_b": 60, "cn_c": 73, "cn_d": 79},
-    "Woods (Dense)":            {"c_coeff": 0.15, "cn_a": 25, "cn_b": 55, "cn_c": 70, "cn_d": 77},
+    "Woods (Dense)":            {"c_coeff": 0.15, "cn_a": 30, "cn_b": 55, "cn_c": 70, "cn_d": 77},
     "Farmsteads":               {"c_coeff": 0.55, "cn_a": 59, "cn_b": 74, "cn_c": 82, "cn_d": 86},
+    "Residential (1/8 acre)":   {"c_coeff": 0.65, "cn_a": 77, "cn_b": 85, "cn_c": 90, "cn_d": 92},
     "Residential (1/4 acre)":   {"c_coeff": 0.55, "cn_a": 61, "cn_b": 75, "cn_c": 83, "cn_d": 87},
     "Residential (1/2 acre)":   {"c_coeff": 0.45, "cn_a": 54, "cn_b": 70, "cn_c": 80, "cn_d": 85},
     "Commercial/Business":      {"c_coeff": 0.85, "cn_a": 89, "cn_b": 92, "cn_c": 94, "cn_d": 95},
@@ -39,16 +43,19 @@ LANDUSE_TYPES = {
     "Paved Roads/Parking":      {"c_coeff": 0.95, "cn_a": 98, "cn_b": 98, "cn_c": 98, "cn_d": 98},
 }
 
-# Map NLCD 2021 pixel values to our 14 landuse categories.
+# Map Annual NLCD pixel values to our land-use categories.
+# NLCD developed classes are cross-walked primarily by published imperviousness
+# ranges (<20%, 20-49%, 50-79%, 80-100%). Wetland classes remain approximate
+# proxies because TR-55 does not provide a direct NLCD wetland equivalent.
 # See: https://www.mrlc.gov/data/legends/national-land-cover-database-class-legend-and-description
 NLCD_TO_LANDUSE = {
     11: None,                      # Open Water — exclude from landuse calculation
     12: None,                      # Perennial Ice/Snow
-    21: "Residential (1/4 acre)", # Developed, Open Space
+    21: "Open Space/Lawns",       # Developed, Open Space
     22: "Residential (1/4 acre)", # Developed, Low Intensity
-    23: "Residential (1/2 acre)", # Developed, Medium Intensity
+    23: "Residential (1/8 acre)", # Developed, Medium Intensity
     24: "Commercial/Business",    # Developed, High Intensity
-    31: "Open Space/Lawns",       # Barren Land
+    31: "Fallow/Bare Soil",       # Barren Land
     41: "Woods (Dense)",          # Deciduous Forest
     42: "Woods (Dense)",          # Evergreen Forest
     43: "Woods (Dense)",          # Mixed Forest
