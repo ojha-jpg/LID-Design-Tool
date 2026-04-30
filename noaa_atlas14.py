@@ -117,7 +117,7 @@ class IDF:
         if durations_hr is None:
             durations_hr = [1/12, 0.25, 0.5, 1, 2, 3, 6, 12, 24]   # 5-min … 24-hr
         if ari_years is None:
-            ari_years = [2, 5, 10, 25, 50, 100]
+            ari_years = [2, 5, 10, 25, 50, 100, 500]
         return {
             d: {t: round(self.depth(d, t), 3) for t in ari_years}
             for d in durations_hr

@@ -71,7 +71,7 @@ NLCD_TO_LANDUSE = {
 # Return periods
 # ---------------------------------------------------------------------------
 
-RETURN_PERIODS = [2, 5, 10, 25, 50, 100]  # years
+RETURN_PERIODS = [2, 5, 10, 25, 50, 100, 500]  # years
 
 # ---------------------------------------------------------------------------
 # SCS Exhibit 4-II — Unit peak discharge qu (cfs/mi^2/in)
