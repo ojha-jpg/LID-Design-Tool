@@ -1920,7 +1920,7 @@ def main() -> None:
             # Land use × HSG breakdown
             lu_cn_df = _build_landuse_cn_table(intersection, soil_pct, landuse_pct, area_sqmi)
             if not lu_cn_df.empty:
-                with st.expander("Land Use × Soil CN Breakdown", expanded=True):
+                with st.expander("Land Use × Soil CN Breakdown", expanded=False):
                     if intersection:
                         st.caption("Each row is an exact spatial (land use, HSG) combination from the NLCD × SSURGO pixel intersection.")
                     else:
@@ -1974,6 +1974,9 @@ def main() -> None:
             st.session_state["results_df"]  = results_df
 
             st.success("Calculations complete.")
+
+            st.markdown("**Rational Method — Peak Discharge by Return Period**")
+            st.dataframe(rational_df, hide_index=True, use_container_width=True)
 
             st.markdown("**SCS CN Method — Peak Discharge by Return Period**")
             st.dataframe(cn_df, hide_index=True, use_container_width=True)
@@ -2079,9 +2082,6 @@ def main() -> None:
                         "Bars show incremental rainfall and effective runoff by analysis interval; "
                         "lines show cumulative rainfall and cumulative effective runoff through the storm."
                     )
-
-            st.markdown("**Rational Method — Peak Discharge by Return Period**")
-            st.dataframe(rational_df, hide_index=True, use_container_width=True)
 
             if st.button("View Full Results", type="primary"):
                 st.session_state["step"] = 5
