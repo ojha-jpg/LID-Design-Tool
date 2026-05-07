@@ -58,13 +58,13 @@ from hydrology import (
     composite_cn,
     composite_cn_from_intersection,
     composite_c,
-    nrcs_interval_peak_flow,
-    nrcs_interval_analysis,
+    scs_interval_peak_flow,
+    scs_interval_analysis,
     build_storm_table,
     rational_peak_flow,
     sqmi_to_acres,
     tlag_to_tc,
-    nrcs_watershed_lag,
+    tc_scs_lag,
     tc_kirpich,
 )
 from api_clients import (
@@ -121,9 +121,9 @@ def _init_state():
         "map1_center": USA_CENTER,
         "map1_zoom": DEFAULT_ZOOM,
         "storm_duration_hr": 24,  # CN method design storm duration (hours)
-        "lag_L_ft":   None,       # NRCS watershed lag: flow length (ft) — from DEM
-        "lag_Y_pct":  None,       # NRCS watershed lag: average slope (%) — from DEM
-        "use_lag_tc": False,      # whether to override Tc with NRCS watershed lag formula
+        "lag_L_ft":   None,       # SCS lag: flow length (ft) — from DEM
+        "lag_Y_pct":  None,       # SCS lag: average slope (%) — from DEM
+        "use_lag_tc": False,      # whether to override Tc with SCS lag formula
         "dem_features": None,     # dict from fetch_dem_features()
         "dem_tc_hr":  None,       # Tc computed from DEM L + Y + CN
         "atlas14_live": None,     # True if Atlas 14 returned live data, False if fallback
@@ -1155,7 +1155,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 <p class="subtitle">
   Generated: {today} &nbsp;|&nbsp;
   Pour Point: {coord_str} &nbsp;|&nbsp;
-  Tool: LID Peak Runoff Tool (NRCS CN interval method + Rational Method)
+  Tool: LID Peak Runoff Tool (SCS CN interval method + Rational Method)
 </p>
 
 <!-- ===== 1. WATERSHED OVERVIEW ===== -->
@@ -1186,7 +1186,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 <div class="info">
   <strong>Time of Concentration (Tc)</strong> = {tc * 60:.1f} min drives the Rational Method only:
   Atlas&nbsp;14 intensity is evaluated at duration&nbsp;=&nbsp;Tc.
-  The CN method below uses the maximum incremental effective runoff interval from the NRCS Type&nbsp;II storm table and converts that interval depth to an equivalent discharge for this small catchment.
+  The CN method below uses the maximum incremental effective runoff interval from the SCS Type&nbsp;II storm table and converts that interval depth to an equivalent discharge for this small catchment.
 </div>
 
 <!-- ===== 3. SOIL COMPOSITION ===== -->
@@ -1231,10 +1231,10 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 {atlas_html if atlas_html else "<p>Not available.</p>"}
 
 <!-- ===== 7. CN METHOD ===== -->
-<h2>7. NRCS CN Method Peak Discharge</h2>
+<h2>7. SCS CN Method Peak Discharge</h2>
 <div class="info">
   <strong>Formula:</strong> q<sub>p</sub> = max[incremental effective runoff depth / &Delta;t] &times; A<br>
-  Incremental runoff comes from the central {storm_dur}-hr window of the NRCS Type&nbsp;II mass curve, scaled to Atlas&nbsp;14 depth.<br>
+  Incremental runoff comes from the central {storm_dur}-hr window of the SCS Type&nbsp;II mass curve, scaled to Atlas&nbsp;14 depth.<br>
   The peak interval discharge is computed as the largest incremental runoff depth over &Delta;t = 0.25 hr, converted from in/hr over the watershed area.<br>
   A = {area_sqmi:.3f}&nbsp;mi² — watershed area.
 </div>
@@ -1262,7 +1262,7 @@ figcaption{{font-size:11px;color:#777;font-style:italic;margin-top:6px}}
 
 <div class="footer">
   LID Peak Runoff Tool &nbsp;&bull;&nbsp; Generated {today} &nbsp;&bull;&nbsp;
-  NRCS CN interval method + Rational Method &nbsp;&bull;&nbsp; NOAA Atlas 14
+  SCS CN interval method + Rational Method &nbsp;&bull;&nbsp; NOAA Atlas 14
 </div>
 </body>
 </html>"""
@@ -1568,7 +1568,7 @@ def main() -> None:
             c1.metric("Area (sq mi)", f"{area_sqmi:.3f}" if area_sqmi else "N/A")
             c1.metric("Area (acres)", f"{sqmi_to_acres(area_sqmi):.1f}" if area_sqmi else "N/A")
             if tc_from_api:
-                c2.metric("NRCS Watershed Lag (min)", f"{tlag * 60:.1f}")
+                c2.metric("Lag Time (min)", f"{tlag * 60:.1f}")
                 c2.metric("Tc (min)", f"{tc_from_api * 60:.1f}")
 
             # Set Tc — from StreamStats if available, otherwise default 0.5 hr
@@ -1695,7 +1695,7 @@ def main() -> None:
                                 f"DEM loaded — elevation map and slope available. "
                                 f"Flow length could not be computed "
                                 f"({dem_feats['_flow_length_warning']}). "
-                                f"NRCS watershed lag option will be unavailable; enter Tc manually."
+                                f"SCS Lag Tc option will be unavailable; enter Tc manually."
                             )
                     else:
                         st.session_state["dem_features"] = None
@@ -1866,11 +1866,10 @@ def main() -> None:
             _lag_L = st.session_state.get("lag_L_ft")
             _lag_Y = st.session_state.get("lag_Y_pct")
             if _lag_L and np.isfinite(_lag_L) and _lag_Y and np.isfinite(_lag_Y) and CN > 0:
-                _dem_lag = nrcs_watershed_lag(_lag_L, _lag_Y, CN)
-                _dem_tc = tlag_to_tc(_dem_lag)
+                _dem_tc = tc_scs_lag(_lag_L, _lag_Y, CN)
                 st.session_state["dem_tc_hr"] = _dem_tc
                 _tc_options[
-                    f"NRCS Watershed Lag  (L={_lag_L:,.0f} ft, Y={_lag_Y:.2f}%, CN={CN:.1f}; lag={_dem_lag * 60:.1f} min)  ->  Tc {_dem_tc * 60:.1f} min"
+                    f"NRCS SCS Lag  (L={_lag_L:,.0f} ft, Y={_lag_Y:.2f}%, CN={CN:.1f})  →  {_dem_tc * 60:.1f} min"
                 ] = _dem_tc
                 _kirpich_tc = tc_kirpich(_lag_L, _lag_Y)
                 _tc_options[
@@ -1882,10 +1881,10 @@ def main() -> None:
                 "Time of Concentration (Tc) source",
                 list(_tc_options.keys()),
                 help=(
-                    "**NRCS Watershed Lag** uses: "
-                    "Tlag = (L^0.8 x (S + 1)^0.7) / (1900 x Y^0.5), then Tc = Tlag / 0.6. "
-                    "L is the longest D8 flow path from 3DEP and Y is the mean slope from 3DEP. "
-                    "**Kirpich** uses: Tc(min) = 0.0078 x L^0.77 x S^-0.385, "
+                    "**NRCS SCS Lag** uses the TR-55 lag equation: "
+                    "Tc = (L^0.8 × (S+1)^0.7) / (1440 × Y^0.5), "
+                    "where L is the longest D8 flow path from 3DEP and Y is the mean slope from 3DEP. "
+                    "**Kirpich** uses: Tc(min) = 0.0078 × L^0.77 × S^-0.385, "
                     "where S is slope in ft/ft (Y/100). "
                     "**Manual** lets you enter a value directly in minutes."
                 ),
@@ -1910,7 +1909,7 @@ def main() -> None:
                 step=0.5,
                 help=(
                     "Duration of the design storm in hours. Atlas 14 depth is interpolated "
-                    "for this exact duration. The NRCS Type II storm pattern is normalized "
+                    "for this exact duration. The SCS Type II storm pattern is normalized "
                     "over this selected duration; traditional TR-55 workflows typically use 24 hr."
                 ),
                 key="storm_duration_input",
@@ -1939,10 +1938,10 @@ def main() -> None:
                 depth_D      = atlas14.depth(storm_duration_hr, rp)
                 intensity_tc = atlas14.intensity(tc, rp)
 
-                q_cn       = nrcs_interval_peak_flow(CN, depth_D, area_sqmi, storm_duration_hr)
+                q_cn       = scs_interval_peak_flow(CN, depth_D, area_sqmi, storm_duration_hr)
                 q_rational = rational_peak_flow(C, intensity_tc, area_acres)
 
-                # Runoff depth from the NRCS storm table (last row)
+                # Runoff depth from the SCS storm table (last row)
                 _tbl = build_storm_table(depth_D, storm_duration_hr, CN)
                 q_runoff = _tbl[-1]["Accumulated Effective Runoff (in)"]
 
@@ -1979,19 +1978,19 @@ def main() -> None:
             st.markdown("**Rational Method — Peak Discharge by Return Period**")
             st.dataframe(rational_df, hide_index=True, use_container_width=True)
 
-            st.markdown("**NRCS CN Method — Peak Discharge by Return Period**")
+            st.markdown("**SCS CN Method — Peak Discharge by Return Period**")
             st.dataframe(cn_df, hide_index=True, use_container_width=True)
 
-            with st.expander("NRCS Interval Runoff Analysis", expanded=False):
+            with st.expander("SCS Interval Runoff Analysis", expanded=False):
                 _rp_sel = st.selectbox("Return Period", RETURN_PERIODS, key="storm_analysis_rp")
                 _P_D_sa = atlas14.depth(storm_duration_hr, _rp_sel)
-                _sa     = nrcs_interval_analysis(CN, _P_D_sa, area_sqmi, storm_duration_hr)
+                _sa     = scs_interval_analysis(CN, _P_D_sa, area_sqmi, storm_duration_hr)
 
                 tab_tbl, tab_hyd, tab_depth = st.tabs(["Storm Table", "Runoff Profile", "Depth Analysis"])
 
                 with tab_tbl:
                     st.caption(
-                        f"NRCS Type II storm — central {storm_duration_hr}-hr window, "
+                        f"SCS Type II storm — central {storm_duration_hr}-hr window, "
                         f"P = {_P_D_sa:.2f} in, CN = {CN:.1f}"
                     )
                     st.dataframe(

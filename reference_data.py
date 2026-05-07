@@ -4,7 +4,7 @@ reference_data.py — Single source of truth for LID Peak Runoff Tool.
 CN values are aligned to NRCS TR-55 Table 2-2 categories.
 Rational Method C values are representative screening defaults and should be
 checked against the governing local drainage manual for final design use.
-qu table from NRCS Exhibit 4-II (Type II rainfall distribution, applicable to Oklahoma).
+qu table from SCS Exhibit 4-II (Type II rainfall distribution, applicable to Oklahoma).
 """
 
 # ---------------------------------------------------------------------------
@@ -74,13 +74,13 @@ NLCD_TO_LANDUSE = {
 RETURN_PERIODS = [2, 5, 10, 25, 50, 100, 500]  # years
 
 # ---------------------------------------------------------------------------
-# NRCS Exhibit 4-II — Unit peak discharge qu (cfs/mi^2/in)
+# SCS Exhibit 4-II — Unit peak discharge qu (cfs/mi^2/in)
 # Type II rainfall distribution (Oklahoma standard)
 #
 # Tc values (hours): 0.1 to 10.0
 # Ia/P ratios: 0.10 to 0.50
 #
-# Source: NRCS National Engineering Handbook, Section 4, Exhibit 4-II
+# Source: SCS National Engineering Handbook, Section 4, Exhibit 4-II
 # ---------------------------------------------------------------------------
 
 _IAP = [0.10, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
@@ -109,12 +109,12 @@ QU_TC_VALUES = sorted(QU_TABLE.keys())
 QU_IAP_VALUES = _IAP
 
 # ---------------------------------------------------------------------------
-# NRCS Type II Dimensionless Mass Curve — TR-55 Table B-2
+# SCS Type II Dimensionless Mass Curve — TR-55 Table B-2
 # (t_hr, cumulative_fraction_of_P24)
 # Time in hours (0–24); peak intensity centered at hour 12
 # ---------------------------------------------------------------------------
 
-NRCS_TYPE_II_MASS_CURVE: list[tuple[float, float]] = [
+SCS_TYPE_II_MASS_CURVE: list[tuple[float, float]] = [
     (0.0,   0.000),
     (2.0,   0.022),
     (4.0,   0.048),
@@ -153,11 +153,11 @@ NRCS_TYPE_II_MASS_CURVE: list[tuple[float, float]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# NRCS Dimensionless Unit Hydrograph — NEH Part 630, Chapter 16, Table 16-1
+# SCS Dimensionless Unit Hydrograph — NEH Part 630, Chapter 16, Table 16-1
 # Discharge-ratio ordinates stored as (t/Tp, q/qp) pairs; q/qp = 0 outside [0, 5·Tp]
 # ---------------------------------------------------------------------------
 
-NRCS_DUH: list[tuple[float, float]] = [
+SCS_DUH: list[tuple[float, float]] = [
     (0.0, 0.000),
     (0.1, 0.030),
     (0.2, 0.100),
