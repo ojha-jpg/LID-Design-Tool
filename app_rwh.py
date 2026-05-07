@@ -269,7 +269,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 
     # Title banner
     title_para = _p(
-        "Rainwater Harvesting (RWH) Design Report",
+        "Rainwater Harvesting Tank Design Report",
         size=14, bold=True, color=colors.white,
     )
     sub_para = _p(
@@ -394,7 +394,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 # ============================================================================
 
 def main() -> None:
-    st.title("Rainwater Harvesting (RWH) Design Tool")
+    st.title("Rainwater Harvesting Tank Design Tool")
     st.caption("City of Tulsa LID Manual (2026) — Section 104 · Design Process")
 
     # ========================================================================
@@ -681,7 +681,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="Rainwater Harvesting (RWH) Design Tool",
+        page_title="Rainwater Harvesting Tank Design Tool",
         layout="wide",
         initial_sidebar_state="expanded",
     )

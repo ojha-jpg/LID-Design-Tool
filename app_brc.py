@@ -711,7 +711,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 
     # ── title banner ─────────────────────────────────────────────────────────
     title_para = _p(
-        "Bio-Retention Cell (BRC) Design Report",
+        "Bioretention Cell Design Report",
         size=14, bold=True, color=colors.white,
     )
     sub_para = _p(
@@ -859,7 +859,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 def main() -> None:
     _init_state()
 
-    st.title("Bio-Retention Cell (BRC) Design Tool")
+    st.title("Bioretention Cell Design Tool")
     st.caption("City of Tulsa LID Manual (2026) — Chapter 101")
     _render_site_selector()
 
@@ -1064,7 +1064,7 @@ def main() -> None:
     st.info(
         f"**Placement:** {placement}  \n"
         f"**Loading Ratio:** A_BRC / {lr_label} = {brc_area:,.0f} / {lr_denominator:,.0f} = **{loading_ratio:.2%}**  \n"
-        f"{'LR ≥ 3% — OK' if lr_valid else 'LR < 3% — Consider increasing cell area'}"
+        f"{'LR ≥ 3% — OK' if lr_valid else 'LR < 3% — Adjust contributing area assumptions or cell sizing'}"
     )
 
     if underdrain_required:
@@ -1151,6 +1151,16 @@ def main() -> None:
         )
 
     swv_valid = storage_capacity >= swv_required
+    storage_area_increase_pct = (
+        (swv_required / storage_capacity - 1.0) * 100.0
+        if storage_capacity > 0
+        else float("inf")
+    )
+    ponding_depth_increase_pct = (
+        ((swv_required - storage_capacity) / brc_area) / ponding_depth * 100.0
+        if brc_area > 0 and ponding_depth > 0
+        else float("inf")
+    )
 
     # Overall design validity
     design_valid = swv_valid and t_sp_valid and t_dd_valid
@@ -1213,9 +1223,9 @@ def main() -> None:
         v1.success(f"Storage OK ({storage_capacity:.1f} ≥ {swv_required:.1f} ft³)")
     else:
         shortfall = swv_required - storage_capacity
-        required_area_increase = (swv_required / storage_capacity - 1) * 100
         v1.error(
-            f"Storage short {shortfall:.1f} ft³ — increase area ~{required_area_increase:.0f}%",
+            f"Storage short {shortfall:.1f} ft³ — increase area by {storage_area_increase_pct:.0f}% "
+            f"or ponding depth by {ponding_depth_increase_pct:.0f}%",
         )
     if t_sp_valid:
         v2.success(f"Surface drawdown OK ({t_sp:.1f} hrs)")
@@ -1225,30 +1235,6 @@ def main() -> None:
         v3.success(f"Total drawdown OK ({t_dd:.1f} hrs)")
     else:
         v3.error(f"Total drawdown {t_dd:.1f} hrs > {TDD_TOTAL:.0f}-hr limit")
-
-    with st.expander("Debug values", expanded=False):
-        st.write("Surface drawdown case")
-        st.write(
-            {
-                "surface_orifice_time_hr": surface_orifice_time_hr,
-                "surface_infiltration_time_hr": surface_infiltration_time_hr,
-                "surface_control_mode": surface_control_mode,
-                "surface_drawdown_time_hr": t_sp,
-            }
-        )
-        if underdrain_required and media_depth:
-            st.write("Additional underdrain case")
-            st.write(
-                {
-                    "media_orifice_time_hr": underdrain_orifice_time_hr,
-                    "media_infiltration_time_hr": underdrain_infiltration_time_hr,
-                    "media_control_mode": underdrain_control_mode,
-                    "additional_drawdown_time_hr": t_dd_additional_hr,
-                    "total_drawdown_time_hr": t_dd,
-                }
-            )
-        else:
-            st.write("Additional underdrain case: not applicable")
 
     if underdrain_required and media_depth:
         st.caption(
@@ -1331,7 +1317,7 @@ def main() -> None:
         if not swv_valid:
             issues.append(
                 f"**Storage short** {swv_required - storage_capacity:.1f} ft³ — "
-                f"increase area ~{(swv_required / storage_capacity - 1) * 100:.0f}% or increase depths"
+                f"increase area by {storage_area_increase_pct:.0f}% or ponding depth by {ponding_depth_increase_pct:.0f}%"
             )
         if not t_sp_valid:
             issues.append(
@@ -1346,7 +1332,7 @@ def main() -> None:
         if not lr_valid:
             issues.append(
                 f"**Loading ratio** {loading_ratio:.2%} < {TARGET_LOADING_RATIO:.1%} — "
-                f"increase cell area (guidance for initial sizing)"
+                f"adjust contributing area assumptions or cell sizing"
             )
         st.error(
             "**DESIGN INVALID**\n\n" + "\n\n".join(f"- {i}" for i in issues),
@@ -1424,7 +1410,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="Bio-Retention Cell (BRC) Design Tool",
+        page_title="Bioretention Cell Design Tool",
         layout="wide",
         initial_sidebar_state="expanded",
     )

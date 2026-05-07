@@ -551,7 +551,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 
     # ── title banner ─────────────────────────────────────────────────────────
     title_para = _p(
-        "Permeable Pavement (PP) Design Report",
+        "Permeable Pavement Design Report",
         size=14, bold=True, color=colors.white,
     )
     sub_para = _p(
@@ -671,7 +671,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 def main() -> None:
     _init_state()
 
-    st.title("Permeable Pavement (PP) Design Tool")
+    st.title("Permeable Pavement Design Tool")
     st.caption("City of Tulsa LID Manual (2026) — Chapter 103 · Design Process")
     _render_site_selector()
 
@@ -1122,7 +1122,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="Permeable Pavement (PP) Design Tool",
+        page_title="Permeable Pavement Design Tool",
         layout="wide",
         initial_sidebar_state="expanded",
     )

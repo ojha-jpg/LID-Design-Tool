@@ -5,7 +5,7 @@ All functions are unit-explicit. No external API calls here.
 """
 
 import bisect
-from reference_data import LANDUSE_TYPES, QU_TABLE, QU_TC_VALUES, QU_IAP_VALUES, SCS_TYPE_II_MASS_CURVE, SCS_DUH
+from reference_data import LANDUSE_TYPES, QU_TABLE, QU_TC_VALUES, QU_IAP_VALUES, NRCS_TYPE_II_MASS_CURVE, NRCS_DUH
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ def composite_c(landuse_pct: dict[str, float]) -> float:
 
 def cn_runoff_depth(CN: float, P_24hr_in: float) -> float:
     """
-    Compute runoff depth Q (inches) using NRCS TR-55 curve number method.
+    Compute runoff depth Q (inches) using NRCS TR-55 iterative curve number method.
 
     CN:         composite curve number (dimensionless)
     P_24hr_in:  24-hour rainfall depth (inches)
@@ -97,7 +97,7 @@ def cn_runoff_depth(CN: float, P_24hr_in: float) -> float:
 
 def _interpolate_qu(tc_hr: float, ia_p: float) -> float:
     """
-    Bilinear interpolation of qu from QU_TABLE (SCS Exhibit 4-II).
+    Bilinear interpolation of qu from QU_TABLE (NRCS Exhibit 4-II).
 
     tc_hr:  time of concentration (hours), clamped to [0.1, 10.0]
     ia_p:   Ia/P ratio, clamped to [0.10, 0.50]
@@ -165,13 +165,13 @@ def _interpolate_qu(tc_hr: float, ia_p: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# SCS Type II mass curve helpers
+# NRCS Type II mass curve helpers
 # ---------------------------------------------------------------------------
 
 def _interp_mass_curve(t_hr: float) -> float:
-    """Cumulative fraction F(t) from SCS Type II mass curve via linear interpolation."""
-    times = [t for t, _ in SCS_TYPE_II_MASS_CURVE]
-    fracs = [f for _, f in SCS_TYPE_II_MASS_CURVE]
+    """Cumulative fraction F(t) from NRCS Type II mass curve via linear interpolation."""
+    times = [t for t, _ in NRCS_TYPE_II_MASS_CURVE]
+    fracs = [f for _, f in NRCS_TYPE_II_MASS_CURVE]
     t = max(times[0], min(times[-1], t_hr))
     idx = bisect.bisect_right(times, t)
     if idx == 0:
@@ -190,7 +190,7 @@ def build_storm_table(
     dt: float = 0.25,
 ) -> list[dict]:
     """
-    Build incremental SCS runoff table for a design storm.
+    Build incremental NRCS runoff table for a design storm.
 
     P_D         : total storm depth for this duration (inches) — from NOAA Atlas 14
                   directly for the selected duration and return period
@@ -198,7 +198,7 @@ def build_storm_table(
     CN          : composite curve number
     dt          : time step (hours, default 0.25)
 
-    The SCS Type II temporal pattern is normalized within the storm window so that
+    The NRCS Type II temporal pattern is normalized within the storm window so that
     cumulative depth reaches exactly P_D at t_end.
 
     Returns list of dicts with keys:
@@ -255,7 +255,7 @@ def _runoff_rate_to_cfs(runoff_depth_in: float, dt_hr: float, area_sqmi: float) 
     return runoff_rate_inhr * sqmi_to_acres(area_sqmi) * cfs_per_inhr_ac
 
 
-def scs_interval_peak_flow(
+def nrcs_interval_peak_flow(
     CN: float,
     P_D: float,
     A_sqmi: float,
@@ -265,7 +265,7 @@ def scs_interval_peak_flow(
     """
     Peak discharge (cfs) from the maximum incremental effective runoff interval.
 
-    The design storm is distributed with the SCS Type II mass curve. Incremental
+    The design storm is distributed with the NRCS Type II mass curve. Incremental
     effective runoff is computed with the CN method, then the largest timestep
     runoff depth is converted to an equivalent discharge over that timestep.
     """
@@ -274,7 +274,7 @@ def scs_interval_peak_flow(
     return round(_runoff_rate_to_cfs(peak_runoff_in, dt, A_sqmi), 1)
 
 
-def scs_interval_analysis(
+def nrcs_interval_analysis(
     CN: float,
     P_D: float,
     A_sqmi: float,
@@ -329,7 +329,7 @@ def cn_peak_flow(
     storm_duration_hr: float = 24,
 ) -> float:
     """
-    Peak discharge (cfs) via SCS TR-55 method: qp = qu x A x Q
+    Peak discharge (cfs) via NRCS TR-55 method: qp = qu x A x Q
 
     CN:                composite curve number
     P_D:               storm depth (inches) for the design duration — from Atlas 14
@@ -351,13 +351,13 @@ def cn_peak_flow(
 
 
 # ---------------------------------------------------------------------------
-# SCS Unit Hydrograph — convolution-based peak flow (any storm duration)
+# NRCS Unit Hydrograph — convolution-based peak flow (any storm duration)
 # ---------------------------------------------------------------------------
 
 def _interp_duh(t_tp: float) -> float:
-    """Linear interpolation of SCS dimensionless unit hydrograph q/qp for t/tp."""
-    times  = [t for t, _ in SCS_DUH]
-    ratios = [q for _, q in SCS_DUH]
+    """Linear interpolation of NRCS dimensionless unit hydrograph q/qp for t/tp."""
+    times  = [t for t, _ in NRCS_DUH]
+    ratios = [q for _, q in NRCS_DUH]
     t = max(times[0], min(times[-1], t_tp))
     idx = bisect.bisect_right(times, t)
     if idx == 0:
@@ -369,7 +369,7 @@ def _interp_duh(t_tp: float) -> float:
     return q0 if t1 == t0 else q0 + (q1 - q0) * (t - t0) / (t1 - t0)
 
 
-def scs_uh_peak_flow(
+def nrcs_uh_peak_flow(
     CN: float,
     P_D: float,
     A_sqmi: float,
@@ -378,11 +378,11 @@ def scs_uh_peak_flow(
     dt: float = 0.25,
 ) -> float:
     """
-    Peak discharge (cfs) via SCS unit hydrograph convolution.
+    Peak discharge (cfs) via NRCS unit hydrograph convolution.
 
-    Uses the central duration_hr window of the SCS Type II mass curve scaled
+    Uses the central duration_hr window of the NRCS Type II mass curve scaled
     to P_D (Atlas 14 depth for the design duration) to generate incremental
-    runoff depths, then convolves with the SCS dimensionless unit hydrograph.
+    runoff depths, then convolves with the NRCS dimensionless unit hydrograph.
 
     CN          : composite curve number
     P_D         : storm depth (inches) for the design duration
@@ -414,7 +414,7 @@ def scs_uh_peak_flow(
     return round(max(flow), 1)
 
 
-def scs_uh_hydrograph(
+def nrcs_uh_hydrograph(
     CN: float,
     P_D: float,
     A_sqmi: float,
@@ -423,7 +423,7 @@ def scs_uh_hydrograph(
     dt: float = 0.25,
 ) -> dict:
     """
-    Run the SCS UH convolution and return all intermediate arrays for display.
+    Run the NRCS UH convolution and return all intermediate arrays for display.
 
     Returns a dict with keys:
       "storm_table"   — list[dict] from build_storm_table()
@@ -499,17 +499,17 @@ def acres_to_sqmi(area_acres: float) -> float:
     return area_acres / 640.0
 
 
-def tc_scs_lag(L_ft: float, Y_pct: float, CN: float) -> float:
+def nrcs_watershed_lag(L_ft: float, Y_pct: float, CN: float) -> float:
     """
-    Time of concentration (hours) via the SCS lag equation:
-        Tc = (L^0.8 × (S+1)^0.7) / (1440 × Y^0.5)
+    NRCS watershed lag time (hours):
+        Tlag = (L^0.8 x (S + 1)^0.7) / (1900 x Y^0.5)
 
     L_ft  : hydraulic flow length (feet)
     Y_pct : average watershed slope (percent)
-    CN    : composite curve number (used to compute S = 1000/CN − 10)
+    CN    : composite curve number (used to compute S = 1000/CN - 10)
     """
     S = (1000.0 / CN) - 10.0
-    return (L_ft ** 0.8 * (S + 1) ** 0.7) / (1440.0 * (Y_pct ** 0.5))
+    return (L_ft ** 0.8 * (S + 1) ** 0.7) / (1900.0 * (Y_pct ** 0.5))
 
 
 def tc_kirpich(L_ft: float, Y_pct: float) -> float:
@@ -533,5 +533,5 @@ def tc_kirpich(L_ft: float, Y_pct: float) -> float:
 
 
 def tlag_to_tc(tlag_hr: float) -> float:
-    """Convert SCS lag time (TLAG) to time of concentration: Tc = TLAG / 0.6"""
+    """Convert NRCS watershed lag time (TLAG) to time of concentration: Tc = TLAG / 0.6"""
     return tlag_hr / 0.6
