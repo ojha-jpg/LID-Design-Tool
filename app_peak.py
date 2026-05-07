@@ -1390,7 +1390,7 @@ def main() -> None:
     _init_state()
 
     st.title("LID Peak Runoff Tool")
-    st.caption("Produces peak discharge (cfs) via Curve Number and Rational methods.")
+    st.caption("Produces peak discharge (cfs) via Iterative Curve Number and Rational methods.")
 
     if st.button("Reset / Start Over", type="secondary"):
         _reset()
@@ -1869,7 +1869,7 @@ def main() -> None:
                 _dem_tc = tc_scs_lag(_lag_L, _lag_Y, CN)
                 st.session_state["dem_tc_hr"] = _dem_tc
                 _tc_options[
-                    f"NRCS SCS Lag  (L={_lag_L:,.0f} ft, Y={_lag_Y:.2f}%, CN={CN:.1f})  →  {_dem_tc * 60:.1f} min"
+                    f"NRCS Watershed Lag  (L={_lag_L:,.0f} ft, Y={_lag_Y:.2f}%, CN={CN:.1f})  →  {_dem_tc * 60:.1f} min"
                 ] = _dem_tc
                 _kirpich_tc = tc_kirpich(_lag_L, _lag_Y)
                 _tc_options[
@@ -1978,10 +1978,10 @@ def main() -> None:
             st.markdown("**Rational Method — Peak Discharge by Return Period**")
             st.dataframe(rational_df, hide_index=True, use_container_width=True)
 
-            st.markdown("**SCS CN Method — Peak Discharge by Return Period**")
+            st.markdown("**Iterative CN Method — Peak Discharge by Return Period**")
             st.dataframe(cn_df, hide_index=True, use_container_width=True)
 
-            with st.expander("SCS Interval Runoff Analysis", expanded=False):
+            with st.expander("Iterative CN Method Runoff Analysis", expanded=False):
                 _rp_sel = st.selectbox("Return Period", RETURN_PERIODS, key="storm_analysis_rp")
                 _P_D_sa = atlas14.depth(storm_duration_hr, _rp_sel)
                 _sa     = scs_interval_analysis(CN, _P_D_sa, area_sqmi, storm_duration_hr)
@@ -2145,7 +2145,7 @@ def main() -> None:
                 return fig
 
             st.markdown("### Peak Discharge by Return Period")
-            tab_combined, tab_cn, tab_rational = st.tabs(["Combined", "CN Method", "Rational Method"])
+            tab_combined, tab_cn, tab_rational = st.tabs(["Combined", "Iterative CN Method", "Rational Method"])
 
             with tab_cn:
                 st.caption(
@@ -2158,8 +2158,8 @@ def main() -> None:
                     st.dataframe(cn_df_s5, hide_index=True, use_container_width=True)
                     st.plotly_chart(
                         _plotly_grouped_bar(
-                            f"CN Method — {storm_dur_s5}-hr Storm",
-                            {"CN Peak Q (cfs)": cn_df_s5["CN Peak Q (cfs)"].tolist()},
+                            f"Iterative CN Method — {storm_dur_s5}-hr Storm",
+                            {"Iterative CN Peak Q (cfs)": cn_df_s5["CN Peak Q (cfs)"].tolist()},
                         ),
                         use_container_width=True,
                     )

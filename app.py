@@ -19,7 +19,7 @@ from app_peak import main as peak_main
 # ============================================================================
 
 def homepage() -> None:
-    st.title("LID Design Tools")
+    st.title("LID Web Calculators for Oklahoma")
     st.markdown(
         "**City of Tulsa Low Impact Development (LID) Manual (2026)**  \n"
         "Select a design tool from the sidebar or the cards below."
@@ -35,7 +35,7 @@ def homepage() -> None:
             "in **Chapter 101**. Covers site selection, SWV, ponding depth, "
             "media, underdrain, orifice, and overflow sizing."
         )
-        st.markdown("*Reference: Chapter 101 — Bioretention and Biofiltration*")
+        st.markdown("*Reference: Chapter 101 — Bioretention*")
         if st.button("Open BRC Design Tool", use_container_width=True, type="primary"):
             st.switch_page(brc_page)
 
@@ -64,11 +64,11 @@ def homepage() -> None:
     with col4:
         st.markdown("### Peak Runoff Analysis")
         st.markdown(
-            "5-step watershed delineation, NOAA Atlas 14 precipitation, "
-            "SSURGO soils, NLCD land use, CN + Rational method peak flows. "
+            "5-step: watershed delineation, NOAA Atlas 14 precipitation, "
+            "SSURGO soils, NLCD land use, Iterative CN + Rational method peak flows. "
             "Runs entirely from public APIs."
         )
-        st.markdown("*U.S. points where StreamStats is available · USGS StreamStats + USGS 3DEP DEM*")
+        st.markdown("*U.S. locations where StreamStats is available · USGS StreamStats + USGS 3DEP DEM*")
         if st.button("Open Peak Runoff Tool", use_container_width=True, type="primary"):
             st.switch_page(peak_page)
 
