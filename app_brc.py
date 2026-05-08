@@ -1,5 +1,5 @@
 """
-Bio-Retention Cell (BRC) Design Tool
+Bioretention Cell (BRC) Design Tool
 Based on City of Tulsa LID Manual (2026) - Chapter 101
 
 This tool implements the design workflow for bioretention cells:
@@ -711,7 +711,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 
     # ── title banner ─────────────────────────────────────────────────────────
     title_para = _p(
-        "Bio-Retention Cell (BRC) Design Report",
+        "Bioretention Cell (BRC) Design Report",
         size=14, bold=True, color=colors.white,
     )
     sub_para = _p(
@@ -859,7 +859,7 @@ def generate_pdf_report(inputs: dict, results: dict) -> bytes:
 def main() -> None:
     _init_state()
 
-    st.title("Bio-Retention Cell (BRC) Design Tool")
+    st.title("Bioretention Cell (BRC) Design Tool")
     st.caption("City of Tulsa LID Manual (2026) — Chapter 101")
     _render_site_selector()
 
@@ -1424,7 +1424,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     st.set_page_config(
-        page_title="Bio-Retention Cell (BRC) Design Tool",
+        page_title="Bioretention Cell (BRC) Design Tool",
         layout="wide",
         initial_sidebar_state="expanded",
     )
